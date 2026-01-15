@@ -9,9 +9,18 @@
 
 **📽️ 系统演示如下**
 
-<video width="800" controls muted>
-  <source src="projectshow.mp4" type="video/mp4">
-</video>
+<div align="center">
+  <!-- 视频缩略图 -->
+   <img width="1785" height="999" alt="视频演示缩略图" src="https://github.com/user-attachments/assets/18f2f0bc-6d2c-4b5f-a2b9-a87d16fcd6be" />
+   <img width="1779" height="1028" alt="视频演示缩略图" src="https://github.com/user-attachments/assets/21e5dc93-1c8b-46e3-b33c-f359d94cf2db" />
+   <img width="1797" height="1019" alt="视频演示缩略图" src="https://github.com/user-attachments/assets/1e21162d-e083-40bc-93de-08302f28b08b" />
+   <img width="1791" height="1020" alt="视频演示缩略图6" src="https://github.com/user-attachments/assets/77738e3d-7d80-4d8c-9ea4-61c45e3db5d6" />
+  <!-- 视频链接文字 -->
+   <video width="3651" controls muted>
+   <source src="https://github.com/user-attachments/assets/3196bcfd-d847-4b2e-a4c4-686d5c1ebdf4" type="video/mp4">
+   </video>
+</div>
+
 
 ## ✨ 核心特性
 
