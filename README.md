@@ -7,17 +7,16 @@
 
 **Paper-Agent** 是一个面向科研人员的自动化调研报告生成系统，目标在于解决学术领域论文调研“耗时长、分析浅”的痛点。它不是简单的文献摘要工具，而是一个具备“检索-阅读-分析-综合-报告”全流程能力的智能领域研究助理，能生成有深度、有见解的领域综述报告。
 
-**📽️ 系统演示如下**
-<div align="center">
-  <!-- 视频缩略图 -->
-   <img width="1785" height="999" alt="视频演示缩略图1" src="https://github.com/user-attachments/assets/18f2f0bc-6d2c-4b5f-a2b9-a87d16fcd6be" />
-   <img width="1779" height="1028" alt="视频演示缩略图2" src="https://github.com/user-attachments/assets/21e5dc93-1c8b-46e3-b33c-f359d94cf2db" />
-   <img width="1797" height="1019" alt="视频演示缩略图3" src="https://github.com/user-attachments/assets/1e21162d-e083-40bc-93de-08302f28b08b" />
-   <img width="1791" height="1020" alt="视频演示缩略图4" src="https://github.com/user-attachments/assets/77738e3d-7d80-4d8c-9ea4-61c45e3db5d6" />
-  <!-- 视频链接文字 -->
-   <video width="3651" controls muted>
-   <source src="https://github.com/user-attachments/assets/3196bcfd-d847-4b2e-a4c4-686d5c1ebdf4" type="video/mp4">
-   </video>
+## 📸 项目预览
+
+<summary>点击放大截图查看</summary>
+
+| 截图1 | 截图2 | 截图3 |
+|-------|-------|-------|
+| <img width="400" src="https://github.com/user-attachments/assets/b3617fee-ab47-4aac-9be7-0cb543fd706a" /> | <img width="400" src="https://github.com/user-attachments/assets/a27882fb-3bd8-4f44-b18f-8161bb0d44a6" /> | <img width="400" src="https://github.com/user-attachments/assets/18f2f0bc-6d2c-4b5f-a2b9-a87d16fcd6be" /> |
+| 截图4 | 截图5 | 截图6 |
+| <img width="400" src="https://github.com/user-attachments/assets/21e5dc93-1c8b-46e3-b33c-f359d94cf2db" /> | <img width="400" src="https://github.com/user-attachments/assets/1e21162d-e083-40bc-93de-08302f28b08b" /> | <img width="400" src="https://github.com/user-attachments/assets/77738e3d-7d80-4d8c-9ea4-61c45e3db5d6" /> |
+
 </div>
 
 ## ✨ 核心特性
