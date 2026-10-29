@@ -33,7 +33,9 @@ def run_compose_reply_node():
         analysis_artifact_refs = list(state.get("analysis_artifact_refs") or [])
         writing_outline_artifact_refs = list(state.get("writing_outline_artifact_refs") or [])
         writing_artifact_refs = list(state.get("writing_artifact_refs") or [])
-        final_artifact_refs = list(state.get("final_artifact_refs") or [])
+        # 中文注释：最终产物引用不再是共享状态字段，改成本节点自己的局部列表，
+        # 只用于拼装发给前端的事件内容。
+        final_artifact_refs: list[JsonObject] = []
         diagnostics = dict(state.get("diagnostics") or {})
 
         # 中文说明：最终文件只从写作节点已经完成的内容中拼接，不再调用模型，
@@ -150,7 +152,6 @@ def run_compose_reply_node():
             writing_sections=writing_sections,
             writing_report=writing_report,
             writing_artifact_refs=writing_artifact_refs,
-            final_artifact_refs=final_artifact_refs,
             read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics=diagnostics,
             current_step="reply",
@@ -163,10 +164,7 @@ def run_compose_reply_node():
             analysis_node_llm=state.get("analysis_node_llm"),
             writing_outline_node_llm=state.get("writing_outline_node_llm"),
             writing_node_llm=state.get("writing_node_llm"),
-            search_node_sink=state.get("search_node_sink"),
             runtime_context=runtime,
-            assistant_message=assistant_text,
-            assistant_message_metadata=assistant_metadata,
         )
 
     return _node

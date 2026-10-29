@@ -405,7 +405,6 @@ async def _run_read_node_async(state: State) -> State:
         read_results=[result.to_dict() for result in kept_results],
         read_summary=summary,
         read_artifact_refs=artifact_refs,
-        read_paper_statuses=_ordered_paper_runtime_statuses(papers, paper_runtime_statuses),
         current_step="read",
     )
     if checkpoint:

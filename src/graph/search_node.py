@@ -5,7 +5,7 @@ import inspect
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from src.agents.base import AgentContext
 from src.agents.Prompts import SEARCH_RELEVANCE_FILTER_PROMPT
@@ -18,28 +18,6 @@ from src.llm import ProviderSnapshot, SystemConfig
 from src.paper_retrieval import PaperSearchService
 from src.paper_retrieval.models import PaperDocument, SearchResponse
 from src.repositories.sessions.base import SessionRepository
-
-
-class SearchNodeSink(Protocol):
-    """描述检索节点可选的写盘能力。"""
-
-    def persist(
-        self,
-        *,
-        topic: str,
-        intent: SearchIntent,
-        raw_papers: list[PaperDocument],
-        # DEPRECATED: 2026-08-22
-        # 原因：关键词打分逻辑已下线，不再产出打分明细，写盘参数随之停用。
-        # 替代方案：无（打分明细只有调试用途，没有下游业务读取）。
-        # 计划移除：语义过滤稳定运行一段时间后清理。
-        # scored_papers: list[JsonObject],
-        selected_papers: list[PaperDocument],
-        search_summary: JsonObject,
-        search_output: JsonObject,
-        agent_diagnostics: JsonObject,
-        search_halted: bool,
-    ): ...
 
 
 # DEPRECATED: 2026-08-22
@@ -293,7 +271,6 @@ def run_search_agent_node():
             # DEPRECATED: 2026-08-22 随关键词打分下线，状态里不再携带打分明细。
             # search_scores=search_scores,
             search_summary=search_summary,
-            search_output=search_output,
             search_artifact_refs=search_artifact_refs,
             read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics={"agent": agent_diagnostics},
@@ -305,10 +282,7 @@ def run_search_agent_node():
             search_node_llm=state.get("search_node_llm"),
             read_node_llm=state.get("read_node_llm"),
             analysis_node_llm=state.get("analysis_node_llm"),
-            search_node_sink=state.get("search_node_sink"),
             runtime_context=state.get("runtime_context"),
-            assistant_message=state.get("assistant_message", ""),
-            assistant_message_metadata=dict(state.get("assistant_message_metadata") or {}),
         )
 
     return _node
@@ -323,7 +297,7 @@ def _resolve_reporter(state: State):
     return runtime.sync_port.for_node("search", "论文检索")
 
 
-def _resolve_search_sink(state: State) -> SearchNodeSink | None:
+def _resolve_search_sink(state: State) -> SearchPersistenceSink | None:
     """根据会话上下文决定是否启用检索产物写盘。"""
 
     session_repo = cast(SessionRepository | None, state.get("session_repo"))

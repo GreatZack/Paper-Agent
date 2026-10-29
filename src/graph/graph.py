@@ -30,6 +30,27 @@ class GraphRunResult:
 
 GraphState = State
 
+# 中文注释：`TypedDict` 只在类型检查阶段生效，运行时它就是普通 dict。节点返回一个
+# 未声明的字段不会报错，它会悄悄进入图状态（曾经出现过的 `read_paper_statuses` 就是
+# 这种情况）。这里把声明过的字段名固化成集合，在节点返回值的边界上做断言。
+_DECLARED_STATE_KEYS = frozenset(State.__annotations__)
+
+
+def _check_declared_state_keys(origin: str, payload: Any) -> None:
+    """校验一份待合并进共享状态的字典只包含 State 已声明的字段。
+
+    中文注释：只检查"多出来的键"，不检查缺键——`total=False` 的语义就是缺键合法。
+    """
+
+    if not isinstance(payload, dict):
+        return
+    unknown = set(payload) - _DECLARED_STATE_KEYS
+    if unknown:
+        raise KeyError(
+            f"{origin} 返回了未在 State 声明的字段：{sorted(unknown)}；"
+            "请先在 src/graph/state_models.py 的 State 中声明，或删除该字段。"
+        )
+
 
 def _entrypoint(state: State) -> str:
     """根据是否带阅读恢复现场决定从检索还是阅读节点开始。"""
@@ -58,7 +79,7 @@ def build_graph():
 
 
 def _with_cancellation_boundary(node_name: str, node):
-    """给所有图节点加上统一的用户停止检查，避免节点里重复写样板代码。"""
+    """给所有图节点加上统一的停止检查与状态字段校验，避免节点里重复写样板代码。"""
 
     async def _guarded(state: State) -> State:
         """开始和结束节点时各检查一次，已完成的当前节点不会再启动下一个节点。"""
@@ -69,6 +90,7 @@ def _with_cancellation_boundary(node_name: str, node):
             cancellation.raise_if_requested()
 
         result = await node(state)
+        _check_declared_state_keys(node_name, result)
 
         # 中文注释：如果用户在节点执行期间点了停止，丢弃这个节点尚未提交的结果，
         # 让恢复时从上一个稳定状态重新执行，避免把半成品误认为已经完成。
@@ -151,7 +173,6 @@ def _build_initial_state(
         # DEPRECATED: 2026-08-22 随关键词打分下线，初始状态不再准备打分明细字段。
         # search_scores=[],
         search_summary={},
-        search_output={},
         search_artifact_refs=[],
         read_results=[],
         read_summary={},
@@ -164,11 +185,8 @@ def _build_initial_state(
         writing_sections=[],
         writing_report={},
         writing_artifact_refs=[],
-        final_artifact_refs=[],
         diagnostics={},
         current_step="init",
-        assistant_message="",
-        assistant_message_metadata={},
     )
 
     # 中文注释：直接从脚本调用且传入会话时，也建立最小进度上报能力，
@@ -195,6 +213,7 @@ def _build_initial_state(
     if runtime is not None:
         initial_state["runtime_context"] = runtime
     if state_overrides:
+        _check_declared_state_keys("state_overrides", state_overrides)
         initial_state.update(state_overrides)
     return _merge_read_checkpoint(initial_state)
 
