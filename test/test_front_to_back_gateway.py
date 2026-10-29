@@ -93,7 +93,9 @@ class FrontToBackFastApiTest(unittest.TestCase):
         created = api.create_session("Paper reading")
         sessions = api.list_sessions()
 
-        self.assertFalse(bootstrap["runtime_capabilities"]["websocket_stream"])
+        # 中文注释：实时推送走 SSE，bootstrap 里声明的也是 sse_streaming；
+        # 早期那个 websocket_stream 字段恒为 False，已从接口里删掉。
+        self.assertTrue(bootstrap["runtime_capabilities"]["sse_streaming"])
         self.assertTrue(bootstrap["runtime_capabilities"]["fastapi_rest"])
         self.assertFalse(bootstrap["runtime_capabilities"]["auth_required"])
         self.assertEqual(created["session"]["title"], "Paper reading")

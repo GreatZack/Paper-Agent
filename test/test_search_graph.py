@@ -9,6 +9,11 @@ from src.llm.factory import ProviderSnapshot
 from src.paper_retrieval.models import PaperDocument, SearchResponse
 from src.repositories.sessions.sqlite import SQLiteSessionRepository
 
+try:
+    from .graph_test_support import hermetic_graph_llms
+except ImportError:
+    from graph_test_support import hermetic_graph_llms
+
 
 class _FakeProvider:
     """为图测试提供稳定关键词输出，避免依赖真实模型配置。"""
@@ -117,6 +122,13 @@ class _StubService:
 class GraphTest(unittest.TestCase):
     """验证通用图入口在当前搜索场景下的行为稳定性。"""
 
+    def setUp(self):
+        """把图测试固定在没有本地模型配置的状态，避免结果随 model.json 漂移。"""
+
+        ctx = hermetic_graph_llms()
+        ctx.__enter__()
+        self.addCleanup(ctx.__exit__, None, None, None)
+
     def test_build_graph_returns_compiled_graph(self):
         """验证图可以成功编译。"""
 
@@ -144,7 +156,9 @@ class GraphTest(unittest.TestCase):
         )
 
         self.assertGreaterEqual(len(stub.calls), 1)
-        self.assertEqual(stub.calls[0]["limit"], 5)
+        # 中文注释：limit 是每个来源要拉取的候选池大小，不是最终返回篇数。
+        # 当前配置的候选池为 min(60, max(20, 5×max_results))，max_results=5 时为 25。
+        self.assertEqual(stub.calls[0]["limit"], 25)
         self.assertGreaterEqual(len(result.papers), 1)
         self.assertEqual(result.state["current_step"], "reply")
         self.assertIn("agent", result.diagnostics)
@@ -175,7 +189,8 @@ class GraphTest(unittest.TestCase):
 
         self.assertEqual(len(stub.calls), 1)
         self.assertEqual(stub.calls[0]["sources"], ["openalex", "arxiv"])
-        self.assertEqual(stub.calls[0]["limit"], 5)
+        # 中文注释：候选池大小同样按 max_results=5 计算，语义过滤前要多搜一些候选。
+        self.assertEqual(stub.calls[0]["limit"], 25)
         self.assertLessEqual(len(result.papers), 5)
 
     def test_run_graph_persists_artifacts_when_session_context_is_provided(self):
