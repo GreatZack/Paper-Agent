@@ -3,18 +3,19 @@ from __future__ import annotations
 from typing import Any, TypedDict
 
 from src.agents.contracts import ReviewRequest
-from src.graph.runtime import WorkflowRuntimeContext
-from src.llm import ProviderSnapshot
-from src.paper_retrieval import PaperSearchService
 from src.paper_retrieval.models import PaperDocument
-from src.repositories.sessions.base import SessionRepository
 
 
 JsonObject = dict[str, Any]
 
 
 class State(TypedDict, total=False):
-    """LangGraph 兼容的共享图状态。"""
+    """LangGraph 兼容的共享图状态。
+
+    中文说明：这里只放会被 Checkpointer 持久化的业务数据。会话仓储、事件通道、
+    并发资源、模型快照等运行时依赖一律走 `WorkflowRuntimeContext`（graph context），
+    它们不可序列化，放进 State 会让接入 Checkpointer 后直接失败。
+    """
 
     request: ReviewRequest
     search_results: list[PaperDocument]
@@ -39,13 +40,5 @@ class State(TypedDict, total=False):
     writing_artifact_refs: list[JsonObject]
     diagnostics: JsonObject
     current_step: str
-    session_repo: SessionRepository
     session_key: str
     turn_id: str
-    runtime_context: WorkflowRuntimeContext
-    search_node_service: PaperSearchService
-    search_node_llm: ProviderSnapshot | None | str
-    read_node_llm: ProviderSnapshot | None | str
-    analysis_node_llm: ProviderSnapshot | None | str
-    writing_outline_node_llm: ProviderSnapshot | None | str
-    writing_node_llm: ProviderSnapshot | None | str

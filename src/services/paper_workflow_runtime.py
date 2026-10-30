@@ -36,6 +36,7 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
                     workflow_name="paper_graph",
                 ),
                 cancellation=frame.get("cancellation") if isinstance(frame.get("cancellation"), WorkflowCancellation) else None,
+                session_repo=repo,
             )
 
         checkpoint = frame.get("read_resume_checkpoint")

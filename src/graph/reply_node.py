@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
 from src.repositories.sessions.base import SessionRepository
+
+
+if TYPE_CHECKING:
+    from langgraph.runtime import Runtime
 
 
 FINAL_ARTIFACT_VERSION = "1.0"
@@ -14,10 +18,9 @@ FINAL_ARTIFACT_VERSION = "1.0"
 def run_compose_reply_node():
     """生成工作流里最后一条助手回复，并在节点内直接发给前端。"""
 
-    async def _node(state: State) -> State:
+    async def _node(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """根据检索结果拼装最终回复，同时把结果写成实时事件。"""
 
-        runtime = state.get("runtime_context")
         reporter = _resolve_reporter(runtime)
         papers = list(state.get("search_results") or [])
         read_results = list(state.get("read_results") or [])
@@ -51,7 +54,7 @@ def run_compose_reply_node():
             reporter.progress("正在生成最终的 Markdown 论文文件", stage="compose_reply")
 
         if final_markdown:
-            persisted = await _persist_final_markdown_if_possible(state, final_markdown, writing_report)
+            persisted = await _persist_final_markdown_if_possible(runtime, final_markdown, writing_report)
             if persisted is not None:
                 final_artifact_refs.append(persisted)
                 if reporter is not None:
@@ -155,29 +158,20 @@ def run_compose_reply_node():
             read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics=diagnostics,
             current_step="reply",
-            session_repo=state.get("session_repo"),
             session_key=state.get("session_key"),
             turn_id=state.get("turn_id"),
-            search_node_service=state.get("search_node_service"),
-            search_node_llm=state.get("search_node_llm"),
-            read_node_llm=state.get("read_node_llm"),
-            analysis_node_llm=state.get("analysis_node_llm"),
-            writing_outline_node_llm=state.get("writing_outline_node_llm"),
-            writing_node_llm=state.get("writing_node_llm"),
-            runtime_context=runtime,
         )
 
     return _node
 
 
 def _resolve_reporter(runtime: Any):
-    """从运行上下文里安全取出回复节点的上报器。"""
+    """从 graph context 里安全取出回复节点的上报器。"""
 
-    if not isinstance(runtime, WorkflowRuntimeContext):
+    context = getattr(runtime, "context", None)
+    if context is None or context.sync_port is None:
         return None
-    if runtime.sync_port is None:
-        return None
-    return runtime.sync_port.for_node("compose_reply", "回复整理")
+    return context.sync_port.for_node("compose_reply", "回复整理")
 
 
 def _build_final_markdown(*, topic: str, writing_report: JsonObject, writing_sections: list[JsonObject]) -> str:
@@ -218,15 +212,16 @@ def _build_final_markdown(*, topic: str, writing_report: JsonObject, writing_sec
 
 
 async def _persist_final_markdown_if_possible(
-    state: State,
+    runtime: Runtime[WorkflowRuntimeContext] | None,
     content: str,
     writing_report: JsonObject,
 ) -> JsonObject | None:
     """把最终 Markdown 写入当前会话，并返回前端可识别的产物引用。"""
 
-    repository = state.get("session_repo")
-    session_key = str(state.get("session_key") or "").strip()
-    turn_id = str(state.get("turn_id") or "").strip()
+    context = getattr(runtime, "context", None)
+    repository = context.session_repo if context is not None else None
+    session_key = str(context.session_key or "").strip() if context is not None else ""
+    turn_id = str(context.turn_id or "").strip() if context is not None else ""
     # 中文说明：这里使用仓储协议实际需要的方法判断，便于脚本和测试传入精简实现。
     if repository is None or (
         not isinstance(repository, SessionRepository) and not hasattr(repository, "write_artifact")

@@ -1,6 +1,8 @@
 import asyncio
 import unittest
 
+from langgraph.runtime import Runtime
+
 from src.agents import ReviewRequest
 from src.graph.graph import _check_declared_state_keys, _with_cancellation_boundary
 from src.graph.reply_node import run_compose_reply_node
@@ -32,25 +34,25 @@ class StateContractTest(unittest.TestCase):
     def test_node_wrapper_rejects_undeclared_key(self):
         """门禁必须真正挂在节点包装器上，而不是只存在于工具函数里。"""
 
-        async def _bad_node(state):
+        async def _bad_node(state, runtime):
             """故意返回一个未声明的字段。"""
 
             return {"current_step": "read", "not_declared_anywhere": True}
 
         guarded = _with_cancellation_boundary("bad_node", _bad_node)
         with self.assertRaises(KeyError):
-            asyncio.run(guarded({}))
+            asyncio.run(guarded({}, None))
 
     def test_node_wrapper_passes_declared_update(self):
         """合法节点返回值必须原样透传。"""
 
-        async def _good_node(state):
+        async def _good_node(state, runtime):
             """返回一个合法的增量更新。"""
 
             return {"current_step": "read"}
 
         guarded = _with_cancellation_boundary("good_node", _good_node)
-        self.assertEqual(asyncio.run(guarded({})), {"current_step": "read"})
+        self.assertEqual(asyncio.run(guarded({}, None)), {"current_step": "read"})
 
     def test_removed_fields_stay_undeclared(self):
         """阶段 1 删掉的字段不允许被重新加回 State。"""
@@ -69,7 +71,7 @@ class StateContractTest(unittest.TestCase):
         """回复节点删掉三个字段后，仍然只能返回已声明的键。"""
 
         node = run_compose_reply_node()
-        result = asyncio.run(node({"request": ReviewRequest(topic="state contract")}))
+        result = asyncio.run(node({"request": ReviewRequest(topic="state contract")}, None))
 
         self.assertEqual(set(result) - set(State.__annotations__), set())
         for name in ("assistant_message", "assistant_message_metadata", "final_artifact_refs", "search_node_sink"):
@@ -84,7 +86,7 @@ class CancellationBoundaryTest(unittest.TestCase):
 
         calls: list[dict] = []
 
-        async def _node(state):
+        async def _node(state, runtime):
             """记录节点被调用过，用于证明取消发生在执行之前。"""
 
             calls.append(state)
@@ -93,16 +95,16 @@ class CancellationBoundaryTest(unittest.TestCase):
         cancellation = WorkflowCancellation()
         cancellation.request()
         guarded = _with_cancellation_boundary("cancelled_node", _node)
-        state = {
-            "runtime_context": WorkflowRuntimeContext(
+        runtime = Runtime(
+            context=WorkflowRuntimeContext(
                 session_key="session",
                 turn_id="turn",
                 cancellation=cancellation,
             )
-        }
+        )
 
         with self.assertRaises(asyncio.CancelledError):
-            asyncio.run(guarded(state))
+            asyncio.run(guarded({}, runtime))
 
         self.assertEqual(calls, [])
 
@@ -111,23 +113,23 @@ class CancellationBoundaryTest(unittest.TestCase):
 
         cancellation = WorkflowCancellation()
 
-        async def _node(state):
+        async def _node(state, runtime):
             """模拟节点执行到一半用户点了停止，然后仍然返回一个结果。"""
 
             cancellation.request()
             return {"current_step": "read"}
 
         guarded = _with_cancellation_boundary("cancelled_node", _node)
-        state = {
-            "runtime_context": WorkflowRuntimeContext(
+        runtime = Runtime(
+            context=WorkflowRuntimeContext(
                 session_key="session",
                 turn_id="turn",
                 cancellation=cancellation,
             )
-        }
+        )
 
         with self.assertRaises(asyncio.CancelledError):
-            asyncio.run(guarded(state))
+            asyncio.run(guarded({}, runtime))
 
 
 if __name__ == "__main__":

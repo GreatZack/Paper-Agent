@@ -5,7 +5,7 @@ import inspect
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from src.agents.base import AgentContext
 from src.agents.Prompts import SEARCH_RELEVANCE_FILTER_PROMPT
@@ -17,7 +17,10 @@ from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot, SystemConfig
 from src.paper_retrieval import PaperSearchService
 from src.paper_retrieval.models import PaperDocument, SearchResponse
-from src.repositories.sessions.base import SessionRepository
+
+
+if TYPE_CHECKING:
+    from langgraph.runtime import Runtime
 
 
 # DEPRECATED: 2026-08-22
@@ -64,14 +67,14 @@ class SearchExecutionResult:
 def run_search_agent_node():
     """生成执行图里的检索节点。"""
 
-    async def _node(state: State) -> State:
+    async def _node(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """异步执行检索节点，让图层可以自然接入 ainvoke。"""
 
-        resolved_service = cast(PaperSearchService, state.get("search_node_service") or PaperSearchService())
-        resolved_llm = cast(ProviderSnapshot | None | str, state.get("search_node_llm") or load_search_agent_llm())
-        resolved_sink = _resolve_search_sink(state)
-        reporter = _resolve_reporter(state)
-        runtime_resources = _resolve_runtime_resources(state)
+        resolved_service = PaperSearchService()
+        resolved_llm: ProviderSnapshot | None = load_search_agent_llm()
+        resolved_sink = _resolve_search_sink(runtime)
+        reporter = _resolve_reporter(runtime)
+        runtime_resources = _resolve_runtime_resources(runtime)
 
         if reporter is not None:
             reporter.started("正在生成检索条件", stage="plan_search")
@@ -275,46 +278,42 @@ def run_search_agent_node():
             read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics={"agent": agent_diagnostics},
             current_step="search",
-            session_repo=state.get("session_repo"),
             session_key=state.get("session_key"),
             turn_id=state.get("turn_id"),
-            search_node_service=state.get("search_node_service"),
-            search_node_llm=state.get("search_node_llm"),
-            read_node_llm=state.get("read_node_llm"),
-            analysis_node_llm=state.get("analysis_node_llm"),
-            runtime_context=state.get("runtime_context"),
         )
 
     return _node
 
 
-def _resolve_reporter(state: State):
-    """从共享状态里取出检索节点专用的上报器。"""
+def _resolve_reporter(runtime: Runtime[WorkflowRuntimeContext] | None):
+    """从 graph context 里取出检索节点专用的上报器。"""
 
-    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
-    if runtime is None or runtime.sync_port is None:
+    context = runtime.context if runtime is not None else None
+    if context is None or context.sync_port is None:
         return None
-    return runtime.sync_port.for_node("search", "论文检索")
+    return context.sync_port.for_node("search", "论文检索")
 
 
-def _resolve_search_sink(state: State) -> SearchPersistenceSink | None:
-    """根据会话上下文决定是否启用检索产物写盘。"""
+def _resolve_search_sink(runtime: Runtime[WorkflowRuntimeContext] | None) -> SearchPersistenceSink | None:
+    """根据运行时上下文决定是否启用检索产物写盘。"""
 
-    session_repo = cast(SessionRepository | None, state.get("session_repo"))
-    session_key = _normalize_optional_str(state.get("session_key"))
-    turn_id = _normalize_optional_str(state.get("turn_id"))
-    if session_repo is None or session_key is None or turn_id is None:
+    context = runtime.context if runtime is not None else None
+    if context is None or context.session_repo is None:
         return None
-    return SearchPersistenceSink(session_repo, session_key=session_key, turn_id=turn_id)
+    session_key = _normalize_optional_str(context.session_key)
+    turn_id = _normalize_optional_str(context.turn_id)
+    if session_key is None or turn_id is None:
+        return None
+    return SearchPersistenceSink(context.session_repo, session_key=session_key, turn_id=turn_id)
 
 
-def _resolve_runtime_resources(state: State) -> WorkflowRuntimeResources | None:
+def _resolve_runtime_resources(runtime: Runtime[WorkflowRuntimeContext] | None) -> WorkflowRuntimeResources | None:
     """从运行时上下文中取出搜索节点可复用的并发资源。"""
 
-    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
-    if runtime is None:
+    context = runtime.context if runtime is not None else None
+    if context is None:
         return None
-    return runtime.resources if isinstance(runtime.resources, WorkflowRuntimeResources) else None
+    return context.resources if isinstance(context.resources, WorkflowRuntimeResources) else None
 
 
 def _normalize_optional_str(value: Any) -> str | None:

@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from src.agents.Prompts import READ_DEEP_READ_SELECTION_PROMPT
 from src.agents.readAgent import ReadAgentModelUnavailableError, build_read_agent, load_read_agent_llm
@@ -30,6 +30,10 @@ from src.repositories.sessions.base import SessionRepository
 from src.utils.read_utils.chunkers import async_build_chunks_file
 from src.utils.read_utils.extraction import async_extract_paper_from_chunks, empty_extraction, extraction_payload
 from src.utils.read_utils.verify_extraction import async_verify_extraction
+
+
+if TYPE_CHECKING:
+    from langgraph.runtime import Runtime
 
 
 # 中文说明：全文切分后默认只保留 chunk.json，不调用向量嵌入服务。
@@ -284,15 +288,15 @@ class CompletedPaperCounter:
 def run_read_node():
     """生成执行图中的阅读节点，直接返回异步节点实现。"""
 
-    async def _node(state: State) -> State:
+    async def _node(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """阅读节点已经具备 async 主流程，图层改成 ainvoke 后这里直接 await 即可。"""
 
-        return await _run_read_node_async(state)
+        return await _run_read_node_async(state, runtime)
 
     return _node
 
 
-async def _run_read_node_async(state: State) -> State:
+async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
     """并发处理多篇论文，并在资源不可用时按论文状态保存恢复现场。"""
 
     request = state.get("request")
@@ -303,10 +307,10 @@ async def _run_read_node_async(state: State) -> State:
     checkpoint = _checkpoint_from_state(state)
     papers = _deduplicate_papers(list(state.get("search_results") or _papers_from_payload(checkpoint.get("search_results"))))
 
-    reporter = _resolve_reporter(state)
-    sink = _resolve_sink(state)
-    runtime_resources = _resolve_runtime_resources(state)
-    llm = _resolve_llm(state, config.agent_name)
+    reporter = _resolve_reporter(runtime)
+    sink = _resolve_sink(runtime)
+    runtime_resources = _resolve_runtime_resources(runtime)
+    llm = load_read_agent_llm(config.agent_name)
     if ENABLE_FULL_TEXT_EMBEDDING:
         embedding_connection, embedding_error = _resolve_embedding_connection(
             system_config,
@@ -1014,24 +1018,13 @@ def _deduplicate_papers(papers: list[PaperDocument]) -> list[PaperDocument]:
         unique.append(paper)
     return unique
 
-def _resolve_runtime_resources(state: State) -> WorkflowRuntimeResources | None:
-    """从运行时上下文里取出单次 run 共享的资源对象。"""
+def _resolve_runtime_resources(runtime: Runtime[WorkflowRuntimeContext] | None) -> WorkflowRuntimeResources | None:
+    """从 graph context 里取出单次 run 共享的资源对象。"""
 
-    runtime = state.get("runtime_context")
-    if not isinstance(runtime, WorkflowRuntimeContext):
+    context = runtime.context if runtime is not None else None
+    if context is None:
         return None
-    return runtime.resources if isinstance(runtime.resources, WorkflowRuntimeResources) else None
-
-
-def _resolve_llm(state: State, agent_name: str) -> ProviderSnapshot | None:
-    """优先使用状态注入的阅读模型，正式运行时再从本地配置加载默认模型。"""
-
-    injected = state.get("read_node_llm")
-    if isinstance(injected, ProviderSnapshot):
-        return injected
-    if injected is None:
-        return load_read_agent_llm(agent_name)
-    return None
+    return context.resources if isinstance(context.resources, WorkflowRuntimeResources) else None
 
 
 def load_read_node_llm(agent_name: str | None = None) -> ProviderSnapshot | None:
@@ -1081,24 +1074,27 @@ def _resolve_embedding_connection(
         return None, error
 
 
-def _resolve_sink(state: State) -> ReadPersistenceSink | None:
-    """仅在会话信息完整时启用阅读产物写盘，普通脚本调用仍可直接运行。"""
+def _resolve_sink(runtime: Runtime[WorkflowRuntimeContext] | None) -> ReadPersistenceSink | None:
+    """仅在运行时上下文完整时启用阅读产物写盘，普通脚本调用仍可直接运行。"""
 
-    repo = state.get("session_repo")
-    session_key = str(state.get("session_key") or "").strip()
-    turn_id = str(state.get("turn_id") or "").strip()
+    context = runtime.context if runtime is not None else None
+    if context is None:
+        return None
+    repo = context.session_repo
+    session_key = str(context.session_key or "").strip()
+    turn_id = str(context.turn_id or "").strip()
     if not isinstance(repo, SessionRepository) or not session_key or not turn_id:
         return None
     return ReadPersistenceSink(repo, session_key=session_key, turn_id=turn_id)
 
 
-def _resolve_reporter(state: State):
-    """从运行上下文中取出阅读节点上报器，没有前端同步接口时返回空值。"""
+def _resolve_reporter(runtime: Runtime[WorkflowRuntimeContext] | None):
+    """从 graph context 里取出阅读节点上报器，没有前端同步接口时返回空值。"""
 
-    runtime = state.get("runtime_context")
-    if not isinstance(runtime, WorkflowRuntimeContext) or runtime.sync_port is None:
+    context = runtime.context if runtime is not None else None
+    if context is None or context.sync_port is None:
         return None
-    return runtime.sync_port.for_node("read", "论文阅读")
+    return context.sync_port.for_node("read", "论文阅读")
 
 
 def _build_summary(results: list[PaperReadResult], deep_read_count: int) -> JsonObject:

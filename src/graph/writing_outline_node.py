@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from src.agents.writingOutlineAgent import (
     OVERALL_ANALYSIS_FIELDS,
@@ -14,7 +14,10 @@ from src.graph.runtime import WorkflowRuntimeContext
 from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot
 from src.models.sessions import utc_now
-from src.repositories.sessions.base import SessionRepository
+
+
+if TYPE_CHECKING:
+    from langgraph.runtime import Runtime
 
 
 # 中文说明：标题字段和正文范围发生了变化，使用新版本号便于识别旧产物。
@@ -29,16 +32,16 @@ def run_writing_outline_node():
     小节正文写作还没有设计好，所以这里不会生成正文，避免后面不好改。
     """
 
-    async def _node(state: State) -> State:
+    async def _node(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """从分析报告里读取 overall_framework，并生成结构化写作大纲。"""
 
         request = state.get("request")
         if request is None:
             raise ValueError("写作大纲节点缺少用户综述主题，无法继续生成大纲")
 
-        reporter = _resolve_reporter(state)
+        reporter = _resolve_reporter(runtime)
         analysis_report = dict(state.get("analysis_report") or {})
-        llm = _resolve_llm(state)
+        llm = load_writing_outline_agent_llm()
         agent = build_writing_outline_agent(llm)
 
         if reporter is not None:
@@ -73,7 +76,7 @@ def run_writing_outline_node():
         }
 
         artifact_refs = list(state.get("writing_outline_artifact_refs") or [])
-        persisted = await _persist_outline_if_possible(state, report)
+        persisted = await _persist_outline_if_possible(runtime, report)
         if persisted:
             artifact_refs.append(persisted)
             if reporter is not None:
@@ -241,32 +244,22 @@ def _available_evidence_fields(overall_analysis: JsonObject, *fields: str) -> li
     ]
 
 
-def _resolve_llm(state: State) -> ProviderSnapshot | None:
-    """优先使用外部注入的写作大纲模型，没有注入时读取默认配置。"""
+def _resolve_reporter(runtime: Runtime[WorkflowRuntimeContext] | None):
+    """从 graph context 里取出写作大纲节点的进度上报器。"""
 
-    injected = state.get("writing_outline_node_llm")
-    if isinstance(injected, ProviderSnapshot):
-        return injected
-    if injected is None:
-        return load_writing_outline_agent_llm()
-    return None
-
-
-def _resolve_reporter(state: State):
-    """从运行上下文里取出写作大纲节点的进度上报器。"""
-
-    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
-    if runtime is None or runtime.sync_port is None:
+    context = runtime.context if runtime is not None else None
+    if context is None or context.sync_port is None:
         return None
-    return runtime.sync_port.for_node("write_outline", "写作大纲")
+    return context.sync_port.for_node("write_outline", "写作大纲")
 
 
-async def _persist_outline_if_possible(state: State, report: JsonObject) -> JsonObject | None:
+async def _persist_outline_if_possible(runtime: Runtime[WorkflowRuntimeContext] | None, report: JsonObject) -> JsonObject | None:
     """如果当前有会话仓库，就把写作大纲保存成 JSON 产物。"""
 
-    repo = cast(SessionRepository | None, state.get("session_repo"))
-    session_key = _optional_text(state.get("session_key"))
-    turn_id = _optional_text(state.get("turn_id"))
+    context = runtime.context if runtime is not None else None
+    repo = context.session_repo if context is not None else None
+    session_key = _optional_text(context.session_key) if context is not None else None
+    turn_id = _optional_text(context.turn_id) if context is not None else None
     if repo is None or not session_key or not turn_id:
         return None
     try:

@@ -1,6 +1,8 @@
 import asyncio
 import tempfile
 import unittest
+from contextlib import ExitStack, contextmanager
+from unittest import mock
 
 from graph import build_graph, run_graph
 from src.agents import ReviewRequest
@@ -119,6 +121,32 @@ class _StubService:
         )
 
 
+@contextmanager
+def _fake_backends(
+    stub: "_StubService | None" = None,
+    *,
+    search_snapshot: ProviderSnapshot | None = None,
+    read_snapshot: ProviderSnapshot | None = None,
+):
+    """把节点内部真实的检索服务和模型装配换成测试替身。
+
+    中文说明：依赖不再经由 state 注入，测试改为替换模块级工厂/加载函数。
+    这样测试和生产走同一个 context 通道，不再存在"只有测试会写"的后门字段。
+    """
+
+    patches = []
+    if stub is not None:
+        patches.append(mock.patch("src.graph.search_node.PaperSearchService", lambda: stub))
+    if search_snapshot is not None:
+        patches.append(mock.patch("src.graph.search_node.load_search_agent_llm", lambda *args, **kwargs: search_snapshot))
+    if read_snapshot is not None:
+        patches.append(mock.patch("src.graph.read_node.load_read_agent_llm", lambda *args, **kwargs: read_snapshot))
+    with ExitStack() as stack:
+        for patcher in patches:
+            stack.enter_context(patcher)
+        yield
+
+
 class GraphTest(unittest.TestCase):
     """验证通用图入口在当前搜索场景下的行为稳定性。"""
 
@@ -141,19 +169,15 @@ class GraphTest(unittest.TestCase):
         """验证图执行后会把论文结果写入共享状态与稳定返回值。"""
 
         stub = _StubService()
-        result = asyncio.run(
-            run_graph(
-            ReviewRequest(
-                topic="multi-agent literature review",
-                constraints={"sources": ["openalex"], "max_results": 5},
-            ),
-            state_overrides={
-                "search_node_service": stub,
-                "search_node_llm": _fake_snapshot(),
-                "read_node_llm": _read_snapshot(),
-            },
+        with _fake_backends(stub, search_snapshot=_fake_snapshot(), read_snapshot=_read_snapshot()):
+            result = asyncio.run(
+                run_graph(
+                    ReviewRequest(
+                        topic="multi-agent literature review",
+                        constraints={"sources": ["openalex"], "max_results": 5},
+                    )
+                )
             )
-        )
 
         self.assertGreaterEqual(len(stub.calls), 1)
         # 中文注释：limit 是每个来源要拉取的候选池大小，不是最终返回篇数。
@@ -173,19 +197,15 @@ class GraphTest(unittest.TestCase):
         """验证搜索节点会把多来源请求收口到一次异步服务调用里。"""
 
         stub = _StubService()
-        result = asyncio.run(
-            run_graph(
-            ReviewRequest(
-                topic="multi-agent literature review",
-                constraints={"sources": ["openalex", "arxiv"], "max_results": 5},
-            ),
-            state_overrides={
-                "search_node_service": stub,
-                "search_node_llm": _fake_snapshot(),
-                "read_node_llm": _read_snapshot(),
-            },
+        with _fake_backends(stub, search_snapshot=_fake_snapshot(), read_snapshot=_read_snapshot()):
+            result = asyncio.run(
+                run_graph(
+                    ReviewRequest(
+                        topic="multi-agent literature review",
+                        constraints={"sources": ["openalex", "arxiv"], "max_results": 5},
+                    )
+                )
             )
-        )
 
         self.assertEqual(len(stub.calls), 1)
         self.assertEqual(stub.calls[0]["sources"], ["openalex", "arxiv"])
@@ -200,22 +220,18 @@ class GraphTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = SQLiteSessionRepository(storage_root=temp_dir)
             session = repo.create("Paper search")
-            result = asyncio.run(
-                run_graph(
-                ReviewRequest(
-                    topic="multi-agent literature review",
-                    constraints={"sources": ["openalex"], "max_results": 3},
-                ),
-                session_repo=repo,
-                session_key=session.key,
-                turn_id="turn-search-1",
-                state_overrides={
-                    "search_node_service": stub,
-                    "search_node_llm": _fake_snapshot(),
-                    "read_node_llm": _read_snapshot(),
-                },
+            with _fake_backends(stub, search_snapshot=_fake_snapshot(), read_snapshot=_read_snapshot()):
+                result = asyncio.run(
+                    run_graph(
+                        ReviewRequest(
+                            topic="multi-agent literature review",
+                            constraints={"sources": ["openalex"], "max_results": 3},
+                        ),
+                        session_repo=repo,
+                        session_key=session.key,
+                        turn_id="turn-search-1",
+                    )
                 )
-            )
 
             thread = repo.get(session.key).thread()
             artifact_names = [artifact["name"] for artifact in thread["artifacts"]]
@@ -239,30 +255,30 @@ class GraphTest(unittest.TestCase):
             repo = SQLiteSessionRepository(storage_root=temp_dir)
             session = repo.create("Paper read checkpoint")
 
-            with self.assertRaises(RuntimeError):
-                asyncio.run(
-                    run_graph(
-                    ReviewRequest(
-                        topic="multi-agent literature review",
-                        constraints={"sources": ["openalex"], "max_results": 3},
-                    ),
-                    session_repo=repo,
-                    session_key=session.key,
-                    turn_id="turn-read-checkpoint",
-                    state_overrides={
-                        "search_node_service": stub,
-                        "search_node_llm": _fake_snapshot(),
-                        "read_node_llm": _fake_snapshot(
-                            response=LLMResponse(
-                                content="model unavailable",
-                                finish_reason="error",
-                                error_kind="server_error",
-                                error_status_code=503,
-                            )
-                        ),
-                    },
+            with _fake_backends(
+                stub,
+                search_snapshot=_fake_snapshot(),
+                read_snapshot=_fake_snapshot(
+                    response=LLMResponse(
+                        content="model unavailable",
+                        finish_reason="error",
+                        error_kind="server_error",
+                        error_status_code=503,
                     )
-                )
+                ),
+            ):
+                with self.assertRaises(RuntimeError):
+                    asyncio.run(
+                        run_graph(
+                            ReviewRequest(
+                                topic="multi-agent literature review",
+                                constraints={"sources": ["openalex"], "max_results": 3},
+                            ),
+                            session_repo=repo,
+                            session_key=session.key,
+                            turn_id="turn-read-checkpoint",
+                        )
+                    )
 
             thread = repo.get(session.key).thread()
             checkpoint_artifacts = [
@@ -307,16 +323,13 @@ class GraphTest(unittest.TestCase):
         }
         stub = _StubService()
 
-        result = asyncio.run(
-            run_graph(
-            ReviewRequest(topic="placeholder"),
-            state_overrides={
-                "read_resume_checkpoint": checkpoint,
-                "search_node_service": stub,
-                "read_node_llm": _read_snapshot(),
-            },
+        with _fake_backends(stub, read_snapshot=_read_snapshot()):
+            result = asyncio.run(
+                run_graph(
+                    ReviewRequest(topic="placeholder"),
+                    state_overrides={"read_resume_checkpoint": checkpoint},
+                )
             )
-        )
 
         self.assertEqual(stub.calls, [])
         self.assertEqual(result.state["current_step"], "reply")

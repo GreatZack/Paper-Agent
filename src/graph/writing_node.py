@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from src.agents.writingAgent import (
     WritingAgent,
@@ -17,8 +17,11 @@ from src.graph.state_models import JsonObject, State
 from src.llm import ProviderSnapshot, SystemConfig
 from src.models.sessions import utc_now
 from src.paper_retrieval.models import PaperDocument
-from src.repositories.sessions.base import SessionRepository
 from src.utils.read_utils.cache import safe_cache_name
+
+
+if TYPE_CHECKING:
+    from langgraph.runtime import Runtime
 
 
 # 中文说明：本版本开始，写作产物同时包含摘要和按正文引用整理的参考文献。
@@ -33,7 +36,7 @@ def run_writing_node():
     它会把大纲里的每个小节当成一个独立写作任务，按顺序交给 WritingAgent。
     """
 
-    async def _node(state: State) -> State:
+    async def _node(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """按大纲顺序逐节写作，并把结果保存进共享状态。"""
 
         request = state.get("request")
@@ -44,14 +47,14 @@ def run_writing_node():
             raise ValueError("写作节点缺少写作大纲，无法知道要写哪些小节")
         overall_analysis = dict(dict(state.get("analysis_report") or {}).get("overall_analysis") or {})
 
-        reporter = _resolve_reporter(state)
-        llm = _resolve_llm(state)
+        reporter = _resolve_reporter(runtime)
+        llm = load_writing_agent_llm()
         agent = build_writing_agent(llm)
         search_results = list(state.get("search_results") or [])
         read_results = list(state.get("read_results") or [])
         # State 可能只带有本轮阅读结果，因此额外读取同一会话历史轮次的论文笔记。
         # 这样从已有会话恢复写作时，也能找到没有进入本轮 State 的论文摘要。
-        session_read_results = await asyncio.to_thread(_load_session_read_results, state)
+        session_read_results = await asyncio.to_thread(_load_session_read_results, runtime)
         cache_dir = SystemConfig.load().read.paper_cache_dir
         available_paper_ids = _collect_available_paper_ids(
             search_results=search_results,
@@ -219,7 +222,7 @@ def run_writing_node():
             )
 
         artifact_refs = list(state.get("writing_artifact_refs") or [])
-        persisted = await _persist_writing_if_possible(state, writing_report)
+        persisted = await _persist_writing_if_possible(runtime, writing_report)
         if persisted:
             artifact_refs.append(persisted)
             if reporter is not None:
@@ -259,7 +262,7 @@ def run_writing_node():
     return _node
 
 
-def _load_session_read_results(state: State) -> list[JsonObject]:
+def _load_session_read_results(runtime: Runtime[WorkflowRuntimeContext] | None) -> list[JsonObject]:
     """读取当前会话所有轮次保存的论文阅读笔记。
 
     中文说明：会话产物记录里既有阅读汇总，也有每篇论文自己的 note.json。
@@ -267,8 +270,9 @@ def _load_session_read_results(state: State) -> list[JsonObject]:
     内容完整且不会把同一轮汇总数据重复传给写作 Agent。
     """
 
-    repository = state.get("session_repo")
-    session_key = str(state.get("session_key") or "").strip()
+    context = runtime.context if runtime is not None else None
+    repository = context.session_repo if context is not None else None
+    session_key = str(context.session_key or "").strip() if context is not None else ""
     if repository is None or not session_key:
         return []
 
@@ -828,32 +832,22 @@ def _collect_cited_paper_ids(sections: list[JsonObject]) -> list[str]:
     return result
 
 
-def _resolve_llm(state: State) -> ProviderSnapshot | None:
-    """优先使用外部注入的正文写作模型，没有注入时读取默认配置。"""
+def _resolve_reporter(runtime: Runtime[WorkflowRuntimeContext] | None):
+    """从 graph context 里取出正文写作节点的进度上报器。"""
 
-    injected = state.get("writing_node_llm")
-    if isinstance(injected, ProviderSnapshot):
-        return injected
-    if injected is None:
-        return load_writing_agent_llm()
-    return None
-
-
-def _resolve_reporter(state: State):
-    """从运行上下文里取出正文写作节点的进度上报器。"""
-
-    runtime = cast(WorkflowRuntimeContext | None, state.get("runtime_context"))
-    if runtime is None or runtime.sync_port is None:
+    context = runtime.context if runtime is not None else None
+    if context is None or context.sync_port is None:
         return None
-    return runtime.sync_port.for_node("write", "正文写作")
+    return context.sync_port.for_node("write", "正文写作")
 
 
-async def _persist_writing_if_possible(state: State, report: JsonObject) -> JsonObject | None:
+async def _persist_writing_if_possible(runtime: Runtime[WorkflowRuntimeContext] | None, report: JsonObject) -> JsonObject | None:
     """如果当前有会话仓库，就把正文写作结果保存成 JSON 产物。"""
 
-    repo = cast(SessionRepository | None, state.get("session_repo"))
-    session_key = _optional_text(state.get("session_key"))
-    turn_id = _optional_text(state.get("turn_id"))
+    context = runtime.context if runtime is not None else None
+    repo = context.session_repo if context is not None else None
+    session_key = _optional_text(context.session_key) if context is not None else None
+    turn_id = _optional_text(context.turn_id) if context is not None else None
     if repo is None or not session_key or not turn_id:
         return None
     try:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
 
@@ -17,6 +17,10 @@ from src.graph.writing_outline_node import run_writing_outline_node
 from src.graph.writing_node import run_writing_node
 from src.paper_retrieval.models import PaperDocument
 from src.repositories.sessions.base import SessionRepository
+
+
+if TYPE_CHECKING:
+    from langgraph.runtime import Runtime
 
 
 @dataclass(slots=True)
@@ -61,7 +65,7 @@ def _entrypoint(state: State) -> str:
 def build_graph():
     """构建当前论文工作流使用的执行图。"""
 
-    workflow = StateGraph(State)
+    workflow = StateGraph(State, context_schema=WorkflowRuntimeContext)
     workflow.add_node("run_search_agent", _with_cancellation_boundary("run_search_agent", run_search_agent_node()))
     workflow.add_node("run_read", _with_cancellation_boundary("run_read", run_read_node()))
     workflow.add_node("run_analyse", _with_cancellation_boundary("run_analyse", run_analyse_node()))
@@ -81,15 +85,16 @@ def build_graph():
 def _with_cancellation_boundary(node_name: str, node):
     """给所有图节点加上统一的停止检查与状态字段校验，避免节点里重复写样板代码。"""
 
-    async def _guarded(state: State) -> State:
+    async def _guarded(state: State, runtime: Runtime[WorkflowRuntimeContext] | None) -> State:
         """开始和结束节点时各检查一次，已完成的当前节点不会再启动下一个节点。"""
 
-        runtime = state.get("runtime_context")
-        cancellation = getattr(runtime, "cancellation", None)
+        # 中文注释：运行时依赖统一从 graph context 取，不再经由 state 传递。
+        context = runtime.context if runtime is not None else None
+        cancellation = getattr(context, "cancellation", None)
         if cancellation is not None:
             cancellation.raise_if_requested()
 
-        result = await node(state)
+        result = await node(state, runtime)
         _check_declared_state_keys(node_name, result)
 
         # 中文注释：如果用户在节点执行期间点了停止，丢弃这个节点尚未提交的结果，
@@ -111,18 +116,22 @@ async def run_graph(
     turn_id: str | None = None,
     state_overrides: dict[str, Any] | None = None,
 ) -> GraphRunResult:
-    """异步运行执行图，并把运行上下文一并注入共享状态。"""
+    """异步运行执行图，并通过 graph context 注入运行时依赖。"""
 
     graph = build_graph()
+    runtime = _ensure_runtime(
+        runtime,
+        session_repo=session_repo,
+        session_key=session_key,
+        turn_id=turn_id,
+    )
     initial_state = _build_initial_state(
         request,
-        runtime=runtime,
-        session_repo=session_repo,
         session_key=session_key,
         turn_id=turn_id,
         state_overrides=state_overrides,
     )
-    final_state = await graph.ainvoke(initial_state)
+    final_state = await graph.ainvoke(initial_state, context=runtime)
     papers = list(final_state.get("search_results") or [])
     diagnostics = dict(final_state.get("diagnostics") or {})
     return GraphRunResult(
@@ -156,11 +165,39 @@ def run_graph_sync(
         )
 
 
+def _ensure_runtime(
+    runtime: WorkflowRuntimeContext | None,
+    *,
+    session_repo: SessionRepository | None,
+    session_key: str | None,
+    turn_id: str | None,
+) -> WorkflowRuntimeContext | None:
+    """把调用方给的会话依赖装进运行时上下文，避免它们再经由 state 传递。
+
+    中文注释：直接从脚本调用且传入会话时，也建立最小进度上报能力，
+    这样图里产生的进度和产物仍然会落到同一个会话仓库里。
+    """
+
+    if runtime is None and session_repo is not None and session_key and turn_id:
+        runtime = WorkflowRuntimeContext(
+            session_key=session_key,
+            turn_id=turn_id,
+            workflow_name="paper_graph",
+            sync_port=InlineWorkflowSyncPort(
+                _build_repository_emitter(session_repo, session_key),
+                session_key=session_key,
+                turn_id=turn_id,
+                workflow_name="paper_graph",
+            ),
+        )
+    if runtime is not None and session_repo is not None and runtime.session_repo is None:
+        runtime.session_repo = session_repo
+    return runtime
+
+
 def _build_initial_state(
     request: ReviewRequest,
     *,
-    runtime: WorkflowRuntimeContext | None,
-    session_repo: SessionRepository | None,
     session_key: str | None,
     turn_id: str | None,
     state_overrides: dict[str, Any] | None,
@@ -189,29 +226,10 @@ def _build_initial_state(
         current_step="init",
     )
 
-    # 中文注释：直接从脚本调用且传入会话时，也建立最小进度上报能力，
-    # 这样图里产生的进度和产物仍然会落到同一个会话仓库里。
-    if runtime is None and session_repo is not None and session_key and turn_id:
-        runtime = WorkflowRuntimeContext(
-            session_key=session_key,
-            turn_id=turn_id,
-            workflow_name="paper_graph",
-            sync_port=InlineWorkflowSyncPort(
-                _build_repository_emitter(session_repo, session_key),
-                session_key=session_key,
-                turn_id=turn_id,
-                workflow_name="paper_graph",
-            ),
-        )
-
-    if session_repo is not None:
-        initial_state["session_repo"] = session_repo
     if session_key:
         initial_state["session_key"] = session_key
     if turn_id:
         initial_state["turn_id"] = turn_id
-    if runtime is not None:
-        initial_state["runtime_context"] = runtime
     if state_overrides:
         _check_declared_state_keys("state_overrides", state_overrides)
         initial_state.update(state_overrides)

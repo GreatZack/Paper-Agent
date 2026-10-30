@@ -427,6 +427,7 @@ class SessionRunService:
             ),
             resources=resources,
             cancellation=cancellation,
+            session_repo=self.repo,
         )
 
         try:

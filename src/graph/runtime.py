@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
     from src.graph.runtime_resources import WorkflowRuntimeResources
+    from src.repositories.sessions.base import SessionRepository
 
 from src.models.sessions import utc_now
 
@@ -74,6 +75,10 @@ class WorkflowRuntimeContext:
     # 例如下载限流、共用 AsyncClient、embedding 连接等。节点通过 runtime_context
     # 就能拿到这些资源，不需要再往 State 顶层散落很多字段。
     resources: WorkflowRuntimeResources | None = None
+    # 中文注释：会话仓储是本次 run 的业务依赖，节点用它写产物、读同一会话的历史笔记。
+    # 它持有数据库连接和文件句柄，无法被序列化，所以只能挂在每次 run 注入的 context 上；
+    # 一旦进 State，接 Checkpointer 后第一个节点就会因为无法序列化而失败。
+    session_repo: SessionRepository | None = None
 
 
 class InlineWorkflowSyncPort:
