@@ -4,6 +4,7 @@ import unittest
 from src.agents import ReviewRequest
 from src.graph.graph import _check_declared_state_keys, _with_cancellation_boundary
 from src.graph.reply_node import run_compose_reply_node
+from src.graph.runtime import WorkflowCancellation, WorkflowRuntimeContext
 from src.graph.state_models import State
 
 
@@ -73,6 +74,60 @@ class StateContractTest(unittest.TestCase):
         self.assertEqual(set(result) - set(State.__annotations__), set())
         for name in ("assistant_message", "assistant_message_metadata", "final_artifact_refs", "search_node_sink"):
             self.assertNotIn(name, result)
+
+
+class CancellationBoundaryTest(unittest.TestCase):
+    """验证节点包装器的停止语义：既不启动已取消的节点，也不提交半成品结果。"""
+
+    def test_cancelled_before_node_skips_execution(self):
+        """进入节点前已经请求停止时，节点函数不应被执行。"""
+
+        calls: list[dict] = []
+
+        async def _node(state):
+            """记录节点被调用过，用于证明取消发生在执行之前。"""
+
+            calls.append(state)
+            return {"current_step": "read"}
+
+        cancellation = WorkflowCancellation()
+        cancellation.request()
+        guarded = _with_cancellation_boundary("cancelled_node", _node)
+        state = {
+            "runtime_context": WorkflowRuntimeContext(
+                session_key="session",
+                turn_id="turn",
+                cancellation=cancellation,
+            )
+        }
+
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(guarded(state))
+
+        self.assertEqual(calls, [])
+
+    def test_cancelled_during_node_discards_result(self):
+        """节点执行期间请求停止时，该节点的返回值应被丢弃，不能写回状态。"""
+
+        cancellation = WorkflowCancellation()
+
+        async def _node(state):
+            """模拟节点执行到一半用户点了停止，然后仍然返回一个结果。"""
+
+            cancellation.request()
+            return {"current_step": "read"}
+
+        guarded = _with_cancellation_boundary("cancelled_node", _node)
+        state = {
+            "runtime_context": WorkflowRuntimeContext(
+                session_key="session",
+                turn_id="turn",
+                cancellation=cancellation,
+            )
+        }
+
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(guarded(state))
 
 
 if __name__ == "__main__":
