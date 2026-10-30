@@ -131,7 +131,11 @@ async def run_graph(
         turn_id=turn_id,
         state_overrides=state_overrides,
     )
-    final_state = await graph.ainvoke(initial_state, context=runtime)
+    final_state = await graph.ainvoke(
+        initial_state,
+        config=_build_run_config(runtime),
+        context=runtime,
+    )
     papers = list(final_state.get("search_results") or [])
     diagnostics = dict(final_state.get("diagnostics") or {})
     return GraphRunResult(
@@ -163,6 +167,23 @@ def run_graph_sync(
                 state_overrides=state_overrides,
             )
         )
+
+
+def _build_run_config(runtime: WorkflowRuntimeContext | None) -> dict[str, Any]:
+    """组装本次 run 的追踪元数据，方便按会话/轮次检索轨迹。
+
+    中文注释：这里只放 metadata 和 tags，不写 configurable——thread_id 的粒度
+    要等阶段 4 接 Checkpointer 时再定，提前写死会让后续迁移多改一处。
+    """
+
+    config: dict[str, Any] = {"tags": ["paper_graph"]}
+    if runtime is not None:
+        config["metadata"] = {
+            "session_key": runtime.session_key,
+            "turn_id": runtime.turn_id,
+            "run_id": runtime.run_id,
+        }
+    return config
 
 
 def _ensure_runtime(
