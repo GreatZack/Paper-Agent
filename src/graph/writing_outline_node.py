@@ -100,15 +100,17 @@ def run_writing_outline_node():
                 used_llm=used_llm,
             )
 
-        updated = dict(state)
-        updated.update(
-            writing_outline=outline,
-            writing_outline_report=report,
-            writing_outline_artifact_refs=artifact_refs,
-            diagnostics=diagnostics,
-            current_step="write_outline",
+        # 中文注释：只返回本节点改动的键。
+        return cast(
+            State,
+            {
+                "writing_outline": outline,
+                "writing_outline_report": report,
+                "writing_outline_artifact_refs": artifact_refs,
+                "diagnostics": diagnostics,
+                "current_step": "write_outline",
+            },
         )
-        return cast(State, updated)
 
     return _node
 

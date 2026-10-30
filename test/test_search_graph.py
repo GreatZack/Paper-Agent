@@ -1,11 +1,17 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from contextlib import ExitStack, contextmanager
 from unittest import mock
 
+from langgraph.checkpoint.memory import InMemorySaver
+
 from graph import build_graph, run_graph
 from src.agents import ReviewRequest
+from src.agents.analyseAgent import AnalyseModelResult
+from src.graph.graph import _build_initial_state
+from src.graph.runtime import WorkflowRuntimeContext
 from src.llm.base import LLMResponse
 from src.llm.factory import ProviderSnapshot
 from src.paper_retrieval.models import PaperDocument, SearchResponse
@@ -164,6 +170,103 @@ class GraphTest(unittest.TestCase):
 
         self.assertTrue(hasattr(graph, "invoke"))
         self.assertTrue(hasattr(graph, "ainvoke"))
+
+    def _run_full_graph(self):
+        """跑一次完整链路，供多条验收断言复用。"""
+
+        stub = _StubService()
+        with _fake_backends(stub, search_snapshot=_fake_snapshot(), read_snapshot=_read_snapshot()):
+            result = asyncio.run(
+                run_graph(
+                    ReviewRequest(
+                        topic="multi-agent literature review",
+                        constraints={"sources": ["openalex"], "max_results": 3},
+                    )
+                )
+            )
+        return stub, result
+
+    def test_final_state_contains_core_fields(self):
+        """最小增量返回不能漏掉下游要用的状态字段。"""
+
+        _, result = self._run_full_graph()
+        core_fields = {
+            "request",
+            "search_results",
+            "read_results",
+            "analysis_report",
+            "writing_outline",
+            "writing_report",
+            "writing_sections",
+        }
+
+        self.assertTrue(core_fields <= set(result.state), core_fields - set(result.state))
+
+    def test_final_state_is_json_serializable(self):
+        """最终 state 必须是纯 JSON 数据，这是接 Checkpointer 的硬前提。"""
+
+        _, result = self._run_full_graph()
+
+        payload = json.dumps(result.state, ensure_ascii=False)
+
+        self.assertGreater(len(payload), 0)
+
+    def test_state_survives_failure_and_resumes_from_checkpoint(self):
+        """分析节点失败后能从 checkpoint 继续跑完，且不会重跑前面的节点。"""
+
+        class _FlakyAnalyseAgent:
+            """第一次综合分析失败，第二次成功，用来模拟"服务崩溃后恢复"。"""
+
+            def __init__(self):
+                self.overall_calls = 0
+
+            async def async_analyse_subtopic(self, *, topic, group, usage_callback=None):
+                return AnalyseModelResult(parsed=None, reason="stub: 子主题走兜底")
+
+            async def async_analyse_overall(self, *, topic, subtopic_analyses, usage_callback=None):
+                self.overall_calls += 1
+                if self.overall_calls == 1:
+                    raise RuntimeError("stub analysis model unavailable")
+                return AnalyseModelResult(parsed={}, raw_model_output="{}")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = SQLiteSessionRepository(storage_root=temp_dir)
+            session = repo.create("Resume after failure")
+            stub = _StubService()
+            agent = _FlakyAnalyseAgent()
+            thread_id = "turn-resume-after-failure"
+            config = {"configurable": {"thread_id": thread_id}}
+            context = WorkflowRuntimeContext(
+                session_key=session.key,
+                turn_id=thread_id,
+                workflow_name="paper_graph",
+                session_repo=repo,
+            )
+            graph = build_graph(checkpointer=InMemorySaver())
+            initial_state = _build_initial_state(
+                ReviewRequest(
+                    topic="multi-agent literature review",
+                    constraints={"sources": ["openalex"], "max_results": 3},
+                ),
+                session_key=session.key,
+                turn_id=thread_id,
+                state_overrides=None,
+            )
+
+            with _fake_backends(stub, search_snapshot=_fake_snapshot(), read_snapshot=_read_snapshot()), mock.patch(
+                "src.graph.analyse_node.build_analyse_agent",
+                lambda *args, **kwargs: agent,
+            ):
+                with self.assertRaises(RuntimeError):
+                    asyncio.run(graph.ainvoke(initial_state, config=config, context=context))
+                search_calls_before_resume = len(stub.calls)
+                final_state = asyncio.run(graph.ainvoke(None, config=config, context=context))
+
+            self.assertEqual(final_state["current_step"], "reply")
+            # 中文注释：恢复时从 run_analyse 继续，不能再撞一次检索。
+            self.assertEqual(len(stub.calls), search_calls_before_resume)
+            artifact_names = [artifact["name"] for artifact in repo.get(session.key).thread()["artifacts"]]
+            self.assertEqual(artifact_names.count("search_manifest.json"), 1)
 
     def test_run_graph_returns_ranked_papers(self):
         """验证图执行后会把论文结果写入共享状态与稳定返回值。"""

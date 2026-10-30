@@ -137,29 +137,11 @@ def run_compose_reply_node():
                 final_artifact_count=len(final_artifact_refs),
             )
 
+        # 中文注释：回复节点不产出业务数据，只记录自己的诊断与步骤。
+        # 最终 state 里的其他字段由前面各节点写入，这里不再整包透传。
         return State(
-            request=state["request"],
-            search_results=papers,
-            # DEPRECATED: 2026-08-22 随关键词打分下线，回复节点不再透传打分明细。
-            # search_scores=list(state.get("search_scores") or []),
-            search_summary=summary,
-            search_artifact_refs=artifact_refs,
-            read_results=read_results,
-            read_summary=read_summary,
-            read_artifact_refs=read_artifact_refs,
-            analysis_report=analysis_report,
-            analysis_artifact_refs=analysis_artifact_refs,
-            writing_outline=writing_outline,
-            writing_outline_report=writing_outline_report,
-            writing_outline_artifact_refs=writing_outline_artifact_refs,
-            writing_sections=writing_sections,
-            writing_report=writing_report,
-            writing_artifact_refs=writing_artifact_refs,
-            read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics=diagnostics,
             current_step="reply",
-            session_key=state.get("session_key"),
-            turn_id=state.get("turn_id"),
         )
 
     return _node

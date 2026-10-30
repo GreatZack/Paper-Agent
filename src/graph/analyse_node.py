@@ -172,13 +172,15 @@ def run_analyse_node():
                 total_papers_analyzed=report["execution_metadata"]["total_papers_analyzed"],
             )
 
-        updated = dict(state)
-        updated.update(
-            analysis_report=report,
-            analysis_artifact_refs=artifact_refs,
-            current_step="analyse",
+        # 中文注释：只返回本节点改动的键；未返回的 channel 由 LangGraph 原样保留。
+        return cast(
+            State,
+            {
+                "analysis_report": report,
+                "analysis_artifact_refs": artifact_refs,
+                "current_step": "analyse",
+            },
         )
-        return cast(State, updated)
 
     return _node
 

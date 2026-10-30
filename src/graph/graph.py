@@ -56,13 +56,22 @@ def _check_declared_state_keys(origin: str, payload: Any) -> None:
 
 
 def _entrypoint(state: State) -> str:
-    """根据是否带阅读恢复现场决定从检索还是阅读节点开始。"""
+    """根据是否带阅读恢复现场决定从检索还是阅读节点开始。
 
-    return "run_read" if isinstance(state.get("read_resume_checkpoint"), dict) else "run_search_agent"
+    中文注释：这里用真值判断而不是 isinstance。LangGraph 的 channel 没有删除语义，
+    阅读节点成功时会写一个空 dict 表示"现场已清空"；isinstance 会把 {} 也当成
+    "有待恢复"，导致下次错误地从阅读节点开始。
+    """
+
+    return "run_read" if state.get("read_resume_checkpoint") else "run_search_agent"
 
 
-def build_graph():
-    """构建当前论文工作流使用的执行图。"""
+def build_graph(*, checkpointer: Any = None):
+    """构建当前论文工作流使用的执行图。
+
+    中文注释：checkpointer 目前仅用于测试（2c 的"失败后恢复"验收）；阶段 4 才会
+    把它接到服务启动路径上。
+    """
 
     workflow = StateGraph(State, context_schema=WorkflowRuntimeContext)
     workflow.add_node("run_search_agent", _with_cancellation_boundary("run_search_agent", run_search_agent_node()))
@@ -78,7 +87,7 @@ def build_graph():
     workflow.add_edge("run_writing_outline", "run_writing")
     workflow.add_edge("run_writing", "compose_reply")
     workflow.add_edge("compose_reply", END)
-    return workflow.compile(name="paper_graph")
+    return workflow.compile(name="paper_graph", checkpointer=checkpointer)
 
 
 def _with_cancellation_boundary(node_name: str, node):

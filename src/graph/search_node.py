@@ -272,19 +272,16 @@ def run_search_agent_node():
                 artifact_count=len(search_artifact_refs),
             )
 
+        # 中文注释：只返回本节点改动的键；request / session_key / turn_id 由初始状态提供。
         return State(
-            request=request,
             # 中文注释：持久化用 PaperDocument，写回 State 前转成纯 dict。
             search_results=[paper.to_dict() for paper in search_results],
             # DEPRECATED: 2026-08-22 随关键词打分下线，状态里不再携带打分明细。
             # search_scores=search_scores,
             search_summary=search_summary,
             search_artifact_refs=search_artifact_refs,
-            read_resume_checkpoint=state.get("read_resume_checkpoint", {}),
             diagnostics={"agent": agent_diagnostics},
             current_step="search",
-            session_key=state.get("session_key"),
-            turn_id=state.get("turn_id"),
         )
 
     return _node

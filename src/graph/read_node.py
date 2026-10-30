@@ -411,16 +411,19 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
     # 中文注释：软丢弃的论文不进下游——汇总和产物里保留完整记录（含丢弃理由），
     # 但写回 state 的 read_results 只包含未被丢弃的论文，分析/写作节点自然收窄。
     kept_results = [result for result in results if not result.relevance.discarded]
-    updated = dict(state)
-    updated.update(
-        read_results=[result.to_dict() for result in kept_results],
-        read_summary=summary,
-        read_artifact_refs=artifact_refs,
-        current_step="read",
-    )
+    # 中文注释：只返回本节点真正改动的键。LangGraph 的 channel 没有删除语义，
+    # 想清空恢复现场只能写一个空 dict；入口用真值判断把 {} 当作"没有现场"。
+    updated: dict[str, Any] = {
+        "read_results": [result.to_dict() for result in kept_results],
+        "read_summary": summary,
+        "read_artifact_refs": artifact_refs,
+        "read_resume_checkpoint": {},
+        # 中文注释：_resume_pending_index 可能就地补过 diagnostics，这里显式带出去。
+        "diagnostics": dict(state.get("diagnostics") or {}),
+        "current_step": "read",
+    }
     if checkpoint:
         updated["search_results"] = [paper.to_dict() for paper in papers]
-    updated.pop("read_resume_checkpoint", None)
     return cast(State, updated)
 
 
