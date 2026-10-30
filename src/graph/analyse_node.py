@@ -47,6 +47,8 @@ def run_analyse_node():
         request = state.get("request")
         if request is None:
             raise ValueError("分析节点缺少用户综述主题，无法继续分析")
+        # 中文注释：State 里的 request 是纯 dict，这里取出主题后就只用字符串。
+        topic = str(request.get("topic") or "") if isinstance(request, dict) else ""
 
         reporter = _resolve_reporter(runtime)
         read_results = list(state.get("read_results") or [])
@@ -62,7 +64,7 @@ def run_analyse_node():
         model_used = llm.model if isinstance(llm, ProviderSnapshot) else "unavailable"
 
         if not groups:
-            report = _empty_report(topic=request.topic, model_used=model_used)
+            report = _empty_report(topic=topic, model_used=model_used)
         else:
             completed_subtopic_count = 0
 
@@ -99,7 +101,7 @@ def run_analyse_node():
 
                 analysis = await _analyse_one_subtopic(
                     group,
-                    topic=request.topic,
+                    topic=topic,
                     agent=agent,
                     usage_callback=report_subtopic_usage,
                 )
@@ -137,7 +139,7 @@ def run_analyse_node():
 
             try:
                 overall_analysis = await _analyse_overall(
-                    topic=request.topic,
+                    topic=topic,
                     subtopic_analyses=subtopic_analyses,
                     agent=agent,
                     usage_callback=report_overall_usage,
@@ -149,7 +151,7 @@ def run_analyse_node():
                     reporter.failed(str(exc), stage="analyse_overall")
                 raise
             report = _build_final_report(
-                topic=request.topic,
+                topic=topic,
                 subtopic_analyses=subtopic_analyses,
                 overall_analysis=overall_analysis,
                 model_used=model_used,

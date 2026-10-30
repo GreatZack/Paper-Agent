@@ -44,7 +44,7 @@ def run_compose_reply_node():
         # 中文说明：最终文件只从写作节点已经完成的内容中拼接，不再调用模型，
         # 这样文件内容与用户看到的每个小节、摘要和参考文献保持完全一致。
         final_markdown = _build_final_markdown(
-            topic=str(getattr(state.get("request"), "topic", "") or ""),
+            topic=str((state.get("request") or {}).get("topic") or "") if isinstance(state.get("request"), dict) else "",
             writing_report=writing_report,
             writing_sections=writing_sections,
         )
@@ -85,7 +85,7 @@ def run_compose_reply_node():
                     lines.append(f"摘要已生成，参考文献已整理 {len(writing_report.get('references') or [])} 条。")
             results_by_paper_id = {str(item.get("paper", {}).get("id") or ""): item for item in read_results}
             for index, paper in enumerate(papers[:5], start=1):
-                result = results_by_paper_id.get(paper.id, {})
+                result = results_by_paper_id.get(str(paper.get("id") or ""), {})
                 relevance = dict(result.get("relevance") or {})
                 note = dict(result.get("note") or {})
                 full_text = dict(result.get("full_text") or {})
@@ -94,7 +94,7 @@ def run_compose_reply_node():
                 reason = str(relevance.get("reason") or "").strip() or "-"
                 short_summary = str(note.get("short_summary") or "暂无可用摘要笔记")
                 lines.append(
-                    f"{index}. {paper.title} | 判断：{reason} | {selection_status} | 全文状态："
+                    f"{index}. {paper.get('title') or ''} | 判断：{reason} | {selection_status} | 全文状态："
                     f"{full_text.get('status') or 'not_requested'}\n   {short_summary}"
                 )
             assistant_text = "\n".join(lines)

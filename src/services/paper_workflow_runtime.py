@@ -41,7 +41,7 @@ def build_paper_workflow_message_handler(repo: SessionRepository):
 
         checkpoint = frame.get("read_resume_checkpoint")
         # 中文注释：新请求的约束由前端放在请求体的 constraints 字段中，
-        # 这里把它装进 ReviewRequest，后续图状态就会通过 state["request"].constraints 使用。
+        # 这里把它装进 ReviewRequest，进图前会被转成纯 dict 存进 state["request"]。
         request = _request_from_checkpoint(checkpoint) or ReviewRequest(
             topic=content,
             constraints=_constraints_from_frame(frame),

@@ -302,10 +302,17 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
     request = state.get("request")
     if request is None:
         raise ValueError("阅读节点缺少用户请求，无法判断论文主题")
+    # 中文注释：State 里的 request 是纯 dict；领域对象只在节点内部使用。
+    request_payload = request if isinstance(request, dict) else {}
+    request_topic = str(request_payload.get("topic") or "")
+    request_constraints = dict(request_payload.get("constraints") or {})
     system_config = SystemConfig.load()
     config = system_config.read
     checkpoint = _checkpoint_from_state(state)
-    papers = _deduplicate_papers(list(state.get("search_results") or _papers_from_payload(checkpoint.get("search_results"))))
+    # 中文注释：State 里存的是 dict，阅读链路内部继续使用 PaperDocument，这里统一还原一次。
+    papers = _deduplicate_papers(
+        _papers_from_payload(list(state.get("search_results") or checkpoint.get("search_results") or []))
+    )
 
     reporter = _resolve_reporter(runtime)
     sink = _resolve_sink(runtime)
@@ -331,7 +338,7 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
         restored_result = _paper_result_from_runtime_status(paper_runtime_statuses.get(paper.id) or {}, paper)
         if restored_result is not None:
             results_by_paper_id.setdefault(paper.id, restored_result)
-    deep_read_limit = _deep_read_limit(request.constraints, len(papers))
+    deep_read_limit = _deep_read_limit(request_constraints, len(papers))
     completed_counter = CompletedPaperCounter(len(results_by_paper_id))
 
     if reporter is not None:
@@ -346,8 +353,8 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
     try:
         deep_read_count = await _process_papers_concurrently(
             papers=papers,
-            topic=request.topic,
-            constraints=request.constraints,
+            topic=request_topic,
+            constraints=request_constraints,
             config=config,
             llm=llm,
             embedding_connection=embedding_connection,
@@ -412,7 +419,7 @@ async def _run_read_node_async(state: State, runtime: Runtime[WorkflowRuntimeCon
         current_step="read",
     )
     if checkpoint:
-        updated["search_results"] = papers
+        updated["search_results"] = [paper.to_dict() for paper in papers]
     updated.pop("read_resume_checkpoint", None)
     return cast(State, updated)
 
@@ -2625,7 +2632,8 @@ def _build_resume_checkpoint(
 ) -> JsonObject:
     """新的恢复现场按论文保存状态，不再主要依赖串行位置。"""
 
-    request = state.get("request")
+    request = state.get("request") or {}
+    request_payload = request if isinstance(request, dict) else {}
     checkpoint = {
         "recovery_status": error.recovery_status,
         "current_step": error.current_step,
@@ -2637,9 +2645,9 @@ def _build_resume_checkpoint(
         "deep_read_count": deep_read_count,
         "deep_read_limit": deep_read_limit,
         "request": {
-            "topic": getattr(request, "topic", ""),
-            "constraints": dict(getattr(request, "constraints", {}) or {}),
-            "language": getattr(request, "language", "zh"),
+            "topic": str(request_payload.get("topic") or ""),
+            "constraints": dict(request_payload.get("constraints") or {}),
+            "language": str(request_payload.get("language") or "zh"),
         },
         "search_results": [paper.to_dict() for paper in papers],
         "read_results": [result.to_dict() for result in results],

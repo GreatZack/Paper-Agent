@@ -38,6 +38,8 @@ def run_writing_outline_node():
         request = state.get("request")
         if request is None:
             raise ValueError("写作大纲节点缺少用户综述主题，无法继续生成大纲")
+        # 中文注释：State 里的 request 是纯 dict。
+        topic = str(request.get("topic") or "") if isinstance(request, dict) else ""
 
         reporter = _resolve_reporter(runtime)
         analysis_report = dict(state.get("analysis_report") or {})
@@ -60,11 +62,11 @@ def run_writing_outline_node():
         )
         used_llm = outline is not None and reason == "ok"
         if outline is None:
-            outline = _fallback_outline(topic=request.topic, analysis_report=analysis_report)
+            outline = _fallback_outline(topic=topic, analysis_report=analysis_report)
 
         report = {
             "outline_version": WRITING_OUTLINE_VERSION,
-            "topic": request.topic,
+            "topic": topic,
             # 中文说明：writing_outline 是后续正文写作最应该直接读取的核心对象。
             "writing_outline": outline,
             "execution_metadata": {

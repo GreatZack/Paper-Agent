@@ -15,7 +15,6 @@ from src.graph.search_node import run_search_agent_node
 from src.graph.state_models import State
 from src.graph.writing_outline_node import run_writing_outline_node
 from src.graph.writing_node import run_writing_node
-from src.paper_retrieval.models import PaperDocument
 from src.repositories.sessions.base import SessionRepository
 
 
@@ -27,7 +26,7 @@ if TYPE_CHECKING:
 class GraphRunResult:
     """封装图执行完成后的稳定返回结构。"""
 
-    papers: list[PaperDocument] = field(default_factory=list)
+    papers: list[dict[str, Any]] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
@@ -216,6 +215,20 @@ def _ensure_runtime(
     return runtime
 
 
+def _request_payload(request: ReviewRequest) -> dict[str, Any]:
+    """把领域对象转成可持久化的纯 dict。
+
+    中文说明：State 里只放 JSON 数据，`ReviewRequest` 属于领域对象；在入口转换一次，
+    节点内部统一按 dict 读取。以后若增减字段，只改这里和 `_merge_read_checkpoint`。
+    """
+
+    return {
+        "topic": str(request.topic or ""),
+        "constraints": dict(request.constraints or {}),
+        "language": str(request.language or "zh"),
+    }
+
+
 def _build_initial_state(
     request: ReviewRequest,
     *,
@@ -226,7 +239,7 @@ def _build_initial_state(
     """整理图执行需要的初始状态，避免同步和异步入口各自拼一遍。"""
 
     initial_state = State(
-        request=request,
+        request=_request_payload(request),
         search_results=[],
         # DEPRECATED: 2026-08-22 随关键词打分下线，初始状态不再准备打分明细字段。
         # search_scores=[],
@@ -265,12 +278,12 @@ def _merge_read_checkpoint(state: State) -> State:
         return state
     request_payload = checkpoint.get("request")
     if isinstance(request_payload, dict) and str(request_payload.get("topic") or "").strip():
-        state["request"] = ReviewRequest(
-            topic=str(request_payload.get("topic") or ""),
-            constraints=dict(request_payload.get("constraints") or {}),
-            language=str(request_payload.get("language") or "zh"),
-        )
-    search_results = _papers_from_checkpoint(checkpoint.get("search_results"))
+        state["request"] = {
+            "topic": str(request_payload.get("topic") or ""),
+            "constraints": dict(request_payload.get("constraints") or {}),
+            "language": str(request_payload.get("language") or "zh"),
+        }
+    search_results = [dict(item) for item in list(checkpoint.get("search_results") or []) if isinstance(item, dict)]
     if search_results and not state.get("search_results"):
         state["search_results"] = search_results
     if checkpoint.get("read_results") and not state.get("read_results"):
@@ -281,54 +294,6 @@ def _merge_read_checkpoint(state: State) -> State:
     # read_waiting_model。现在 embedding 也可能等待恢复，优先使用 checkpoint 自带步骤。
     state["current_step"] = str(checkpoint.get("current_step") or "read_waiting_model")
     return state
-
-
-def _papers_from_checkpoint(value: Any) -> list[PaperDocument]:
-    """从阅读 checkpoint 恢复检索论文列表。"""
-
-    if not isinstance(value, list):
-        return []
-    papers: list[PaperDocument] = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        paper_id = str(item.get("id") or "").strip()
-        title = str(item.get("title") or "").strip()
-        if not paper_id or not title:
-            continue
-        papers.append(
-            PaperDocument(
-                id=paper_id,
-                title=title,
-                authors=[str(author).strip() for author in item.get("authors") or [] if str(author).strip()],
-                abstract=str(item.get("abstract")) if item.get("abstract") is not None else None,
-                year=_optional_int(item.get("year")),
-                venue=str(item.get("venue")) if item.get("venue") is not None else None,
-                url=str(item.get("url")) if item.get("url") is not None else None,
-                pdf_url=str(item.get("pdf_url")) if item.get("pdf_url") is not None else None,
-                doi=str(item.get("doi")) if item.get("doi") is not None else None,
-                source=str(item.get("source")) if item.get("source") is not None else None,
-                paperId=str(item.get("paperId")) if item.get("paperId") is not None else None,
-                publication_date=str(item.get("publication_date") or ""),
-                journal_conference=str(item.get("journal_conference") or item.get("journal/conference") or ""),
-                volume=str(item.get("volume") or ""),
-                issue=str(item.get("issue") or ""),
-                language=str(item.get("language") or ""),
-                metadata=dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {},
-            )
-        )
-    return papers
-
-
-def _optional_int(value: Any) -> int | None:
-    """把 checkpoint 里的可选数字恢复为整数。"""
-
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _build_repository_emitter(repo: SessionRepository, session_key: str):

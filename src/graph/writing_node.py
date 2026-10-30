@@ -42,6 +42,8 @@ def run_writing_node():
         request = state.get("request")
         if request is None:
             raise ValueError("写作节点缺少用户综述主题，无法继续生成正文")
+        # 中文注释：State 里的 request 是纯 dict。
+        topic = str(request.get("topic") or "") if isinstance(request, dict) else ""
         outline = dict(state.get("writing_outline") or {})
         if not outline:
             raise ValueError("写作节点缺少写作大纲，无法知道要写哪些小节")
@@ -155,7 +157,7 @@ def run_writing_node():
                 reporter.progress("摘要模型调用完成", stage="writing_abstract", **usage)
 
         abstract, abstract_status = await agent.async_write_abstract(
-            topic=request.topic,
+            topic=topic,
             sections=written_sections,
             word_count=300,
             usage_callback=report_abstract_usage,
@@ -203,7 +205,7 @@ def run_writing_node():
             )
 
         writing_report = _build_writing_report(
-            topic=request.topic,
+            topic=topic,
             outline=outline,
             sections=written_sections,
             abstract=abstract,

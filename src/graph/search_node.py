@@ -5,7 +5,7 @@ import inspect
 import json
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from src.agents.base import AgentContext
 from src.agents.Prompts import SEARCH_RELEVANCE_FILTER_PROMPT
@@ -75,6 +75,10 @@ def run_search_agent_node():
         resolved_sink = _resolve_search_sink(runtime)
         reporter = _resolve_reporter(runtime)
         runtime_resources = _resolve_runtime_resources(runtime)
+        # 中文注释：State 里的 request 是纯 dict，统一在节点入口取一次。
+        request = state.get("request") or {}
+        request_topic = str(request.get("topic") or "")
+        request_constraints = dict(request.get("constraints") or {})
 
         if reporter is not None:
             reporter.started("正在生成检索条件", stage="plan_search")
@@ -176,7 +180,7 @@ def run_search_agent_node():
                 )
             semantic_kept, semantic_discarded = await _filter_semantically_relevant(
                 pool,
-                topic=state["request"].topic,
+                topic=request_topic,
                 llm=resolved_llm if isinstance(resolved_llm, ProviderSnapshot) else None,
                 batch_size=search_config.filter_batch_size,
             )
@@ -196,9 +200,9 @@ def run_search_agent_node():
                 "semantic_discarded_count": len(semantic_discarded),
             }
         )
-        search_output = _build_search_output(state["request"].topic, state["request"].constraints, intent, search_results)
+        search_output = _build_search_output(request_topic, request_constraints, intent, search_results)
         search_summary = {
-            "topic": state["request"].topic,
+            "topic": request_topic,
             "search_halted": search_halted,
             "raw_candidate_count": search_execution.raw_candidate_count,
             "raw_paper_count": len(raw_papers),
@@ -237,7 +241,7 @@ def run_search_agent_node():
         if resolved_sink is not None:
             persistence_result = await asyncio.to_thread(
                 resolved_sink.persist,
-                topic=state["request"].topic,
+                topic=request_topic,
                 intent=intent,
                 raw_papers=raw_papers,
                 # DEPRECATED: 2026-08-22 随关键词打分下线，写盘不再带打分明细。
@@ -269,8 +273,9 @@ def run_search_agent_node():
             )
 
         return State(
-            request=state["request"],
-            search_results=search_results,
+            request=request,
+            # 中文注释：持久化用 PaperDocument，写回 State 前转成纯 dict。
+            search_results=[paper.to_dict() for paper in search_results],
             # DEPRECATED: 2026-08-22 随关键词打分下线，状态里不再携带打分明细。
             # search_scores=search_scores,
             search_summary=search_summary,

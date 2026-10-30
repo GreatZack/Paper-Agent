@@ -186,6 +186,12 @@ class GraphTest(unittest.TestCase):
         self.assertGreaterEqual(len(result.papers), 1)
         self.assertEqual(result.state["current_step"], "reply")
         self.assertIn("agent", result.diagnostics)
+        # 中文注释：2b 之后 request/search_results 必须是纯 dict，且主题不能在迁移中丢失
+        # （`getattr(request, ...)` 在 dict 上会静默返回空串，这条断言专门堵那个坑）。
+        self.assertIsInstance(result.state["request"], dict)
+        self.assertIsInstance(result.state["search_results"][0], dict)
+        self.assertEqual(result.state["request"]["topic"], "multi-agent literature review")
+        self.assertEqual(result.state["search_summary"]["topic"], "multi-agent literature review")
         # DEPRECATED: 2026-08-22
         # 原因：关键词打分逻辑已下线，状态里不再有 search_scores 字段。
         # 替代方案：改用 search_results 检查最终论文产出（见上方 assertGreaterEqual(len(result.papers), 1)）。
@@ -333,7 +339,8 @@ class GraphTest(unittest.TestCase):
 
         self.assertEqual(stub.calls, [])
         self.assertEqual(result.state["current_step"], "reply")
-        self.assertEqual(result.state["search_results"][0].id, "resume-paper-1")
+        self.assertIsInstance(result.state["search_results"][0], dict)
+        self.assertEqual(result.state["search_results"][0]["id"], "resume-paper-1")
         self.assertEqual(result.state["read_results"][0]["note"]["short_summary"], "agent search summary")
 
 
