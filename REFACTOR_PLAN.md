@@ -1,17 +1,34 @@
 # State 重构计划（交接文档）
 
-> 这份文档是重构的**唯一上下文来源**。新会话从第 1 节顺序读，就能接上进度。
-> **最后更新：2026-10-29 晚。阶段 1 已完成，测试基线已修复，阶段 2 尚未开始写代码。**
+> 这份文档是重构的**唯一上下文来源**。新会话先读第 0 节（当前状态 + 立即要做的事），再按需读其他章节。
+> **最后更新：2026-11-04。阶段 2.5 已完成，下一步是阶段 3（state 瘦身）。**
+> 文档已纳入版本库（提交 `7788c44`），后续修改照常提交。
+>
+> **2026-11-04 本次更新**：2.5 决策定稿（read 用 per-paper `Send`、writing 保持单节点、去掉暂停点、失败语义）；阶段 5 重定义（不再做 `interrupt()`）；新增阶段 3 施工计划（§15）；补充部署/基础设施/开源 vs 线上结论（§11.7、§14）；更新测试基线为 59。
 
-## 当前状态速查
+## 0. 当前状态速查
 
 | 项目 | 值 |
 |---|---|
-| 分支 | `dev`，HEAD `0ea02cf`（工作区只应有本文档未跟踪） |
-| State 字段数 | **20**（阶段 2 完成，字段数未变） |
-| 测试 | 59 个用例，`OK (skipped=4)`，约 5 秒，不出网 |
-| 下一步 | **阶段 2.5 DAG / 粒度评审（Gate，不写代码）**，见 11.5 |
+| 分支 | `dev`，HEAD `7788c44`（若 `git status` 只显示本文档，属正常） |
+| State 字段数 | **20** |
+| 测试 | **59 个用例，`OK (skipped=4)`**，约 3~5 秒，不出网 |
+| 已完成 | 阶段 1、1.5、2（2a/2b/2c）、2.5 决策 |
+| 下一步 | **阶段 3：state 瘦身**（去重 + artifact 去绝对路径），施工清单见第 15 节 |
 | 判断标准 | **失败集合不扩大**；当前失败集合为空 |
+| 关键约束 | 节点名 / State 字段名在阶段 5 前冻结；阶段 5 会 bump `GRAPH_VERSION` |
+
+### 文档地图
+
+| 你要找什么 | 看哪节 |
+|---|---|
+| 现在该做什么 | 第 15 节（新会话从这里开始） |
+| 2.5 定了什么 | 第 11.5 节（决策记录，已定稿） |
+| 每个阶段做了什么 | 第 5~8 节 |
+| 为什么这样设计 | 第 9 节（概念约定） |
+| 部署 / 基础设施 / 开源 vs 线上 | §11.1、§11.7 |
+| 已讨论但暂缓、别重复讨论 | 第 14 节 |
+| 环境 / 测试命令 | 第 13 节 |
 
 ---
 
@@ -33,8 +50,9 @@
 判断原则（三条，缺一不可）：
 
 1. **框架有一等公民等价物能力的地方，不手搓。**
-   本项目里典型的是：持久化/恢复（Checkpointer）、依赖注入（`context_schema` + `Runtime`）、人在环暂停（`interrupt()`）、并发编排（`Send` / 子图）、状态合并（reducer）。
+   本项目里典型的是：持久化/恢复（Checkpointer）、依赖注入（`context_schema` + `Runtime`）、并发编排（`Send`）、状态合并（reducer）。
    手搓的版本往往「happy path 能跑、边界条件下有洞」——例如现有 `read_resume_checkpoint` 在正常续跑时没问题，但会出现「成功跑完仍残留 `{}`、下次误判从阅读开始」这类隐患。
+   **例外（已评审）**：`interrupt()` 虽然也是一等公民，但本项目没有"人工暂停/分步确认"的产品需求，2.5 决定**不引入**，资源不可用按普通失败 + 重试处理（见 §11.5 决策 3、§14）。
 2. **框架不管的地方，自己写是正常的，不算债。**
    例如：SSE 事件推送与前端协议、`SessionRepository` 的存储抽象、Agent 的提示词与工具编排、产物文件布局。LangGraph 不提供这些，自研不是"不规范"。
 3. **引入某个框架能力必须有需求触发，不能"有就用"。**
@@ -50,23 +68,25 @@
 
 | 现有实现 | 官方等价物 | 判定 | 计划 |
 |---|---|---|---|
-| `read_resume_checkpoint` + `halt_with_checkpoint` | Checkpointer + `interrupt()` | **是债** | 阶段 4 / 5 替换 |
+| `read_resume_checkpoint` + `halt_with_checkpoint` | Checkpointer（`interrupt()` 不引入） | **是债** | 阶段 5 整段删除，改为"失败 + 重试" |
 | 依赖（repo/通道/资源）塞进 state | `context_schema` + `Runtime` | **是债** | ✅ 2a 已替换 |
-| dataclass 直接进 state | 纯 dict + serde | **是债** | 2b / 2c |
-| 节点内 `asyncio.gather` 处理 N 篇论文 | `Send` / 子图 | **待评估** | 2.5 评审决定 |
+| dataclass 直接进 state | 纯 dict + serde | **是债** | ✅ 2b / 2c 已替换 |
+| 节点内 `asyncio.gather` 处理 N 篇论文 | `Send`（per-paper） | **是债** | ✅ 2.5 决定：阶段 5 拆 per-paper `Send` |
 | 手工累加 artifact refs、手工合并 diagnostics | reducer（`Annotated[...]`） | **部分是**（当前串行图还能用） | 阶段 5 引入并行分支时一起做 |
 | 事件总线 + SSE 推送 | 无（框架不管 UI 事件） | 不是债 | 保留 |
 | `SessionRepository` 存储抽象 | `Store` 是长期记忆，不是替代品 | 不是债 | 保留（见 11.2） |
 | 自研 LLM provider 适配层 | LangChain integrations | 设计选择 | 保留（多协议/鉴权自定义） |
 
-### 硬约束（已确认，不是假设）
+### 硬约束（已确认，2026-11-04 更新）
 
-后续**确定要接入 LangGraph 官方 Checkpointer**，现有手写恢复机制（`read_resume_checkpoint` + `halt_with_checkpoint`）会被 `interrupt()` 模式取代。
+后续**确定要接入 LangGraph 官方 Checkpointer**；现有手写恢复机制（`read_resume_checkpoint` + `halt_with_checkpoint`）在阶段 5 **直接删除**：资源不可用按普通失败处理，用户修好后重试，靠 Checkpointer + 磁盘幂等从断点继续。**不引入 `interrupt()`**。
+
+2.5 评审推翻了最初"用 `interrupt()` 取代手写恢复"的假设：暂停点属于产品 UX 需求，不是持久化的必要条件；去掉它能让图从"带条件入口"变成直线，并整段删除冻结区。`interrupt()` 列入第 14 节"暂缓事项"，触发条件是出现人工暂停/分步确认的产品需求。
 
 这条约束决定了三件事：
 
 - 阶段 2（让 state 可序列化）是**前置条件**，不是可选的整洁工作；
-- `read_resume_checkpoint` 相关代码属于**冻结区**，不投入整改；
+- `read_resume_checkpoint` 相关代码属于**冻结区**，阶段 5 整段删除，现在不投入整改；
 - 字段门禁必须卡在**节点返回值边界**，不能卡在 `graph.ainvoke()` 的返回值上（否则将来会被 `__interrupt__` 等内部键误伤）。
 
 ### 为什么「依赖必须出 state」（结论，勿重复讨论）
@@ -93,18 +113,19 @@
 | 仓库路径 | `C:\Users\AdminZeng\Documents\coding_project\Paper-Agent` |
 | 基线提交 | `af2fc63`（`main` 的最新提交） |
 | 开发分支 | 本地 `dev` |
-| 当前 HEAD | `c1803c1 feat(observability): 给每次 run 挂上追踪元数据` |
+| 当前 HEAD | `7788c44 add REFACTOR_PLAN.md`（文档已入库） |
 | 阶段 1 提交 | `80b7b18 refactor(state): 加字段门禁并删除未使用字段` |
 | 基线修复提交 | `423284e test(graph): 修复 e2e 基线并把真实模型测试改回手动开启` |
 | 阶段 2a 提交 | `7fdf201`（取消测试）、`590d953`（依赖迁出 state）、`c1803c1`（追踪元数据） |
 | 阶段 2b 提交 | `3431165`（`request` / `search_results` 转纯 dict） |
 | 阶段 2c 提交 | `0ea02cf`（最小增量返回 + 恢复现场清除语义 + 3 条验收测试） |
+| 文档提交 | `7788c44`（`REFACTOR_PLAN.md` 入库） |
 | Python | 3.12.13（uv 管理） |
 | 依赖 | `uv.lock` 已锁定，`uv sync` 可复现 |
 
 **注意：不要把这个本地 `dev` 推送到 `origin/dev`。** 上游的 `dev` 是另一代代码（用 `web/`，而本仓库用 `front/`，两者相差 215 个文件、3.6 万行），与 `main` 完全分叉。要推送请推到自己的 fork，并使用不同分支名（例如 `refactor/state-cleanup`）。
 
-**本文档 `REFACTOR_PLAN.md` 不进版本库**（用户明确要求）。它在工作区里是未跟踪状态，属于本地交接资料。
+**本文档 `REFACTOR_PLAN.md` 已纳入版本库**（用户提交 `7788c44`）。后续修改照常提交到 `dev`，不再按"本地未跟踪"处理。
 
 ---
 
@@ -115,27 +136,31 @@
 | **1** | 立字段门禁 + 删死字段 | 后续每一步靠它证明"没写错键" | 否 | ✅ 已完成 |
 | **1.5** | 修测试基线（hermetic e2e + 集成测试隔离开关） | 阶段 2 的验收网 | 否 | ✅ 已完成 |
 | **2** | state 变纯数据 + 依赖走 context + 只返回变化键 | Checkpointer 序列化的硬前提 | **是** | **✅ 全部完成**（2a / 2b / 2c，见第 8 节） |
-| **2.5（评审，不写代码）** | **DAG / 粒度评审**：read 是否拆子图、暂停点在哪、失败语义 | 它决定阶段 3 的 state 形状；接 Checkpointer 后再改图代价高 | 否 | **待做（阶段 3 开工前必须完成，见 11.5）** |
-| **3** | state 瘦身：去重 + 收敛 artifact 字段 | 快照体积与写入量 | 否 | 待做 |
-| **4** | 接入官方 Checkpointer（SQLite saver + `thread_id`） | 前两步完成后才有意义 | — | 待做 |
-| **5** | 用 `interrupt()` 重写暂停/续跑，删掉手写恢复机制 | 需要 Checkpointer 才能做 | — | 待做 |
+| **2.5（评审，不写代码）** | **DAG / 粒度评审**：read 怎么拆、writing 是否拆、暂停点、失败语义 | 决定阶段 3 的 state 形状与阶段 5 的实现方式 | 否 | **✅ 已完成**（决策记录见 11.5） |
+| **3** | state 瘦身：去重 + artifact 去绝对路径 | 快照体积与可移植性（部署/对象存储的前提） | 否 | **下一步** |
+| **4** | 接入官方 Checkpointer（SQLite saver + `thread_id`） | 阶段 3 定型后才接 | — | 待做 |
+| **5** | 5a read 拆 per-paper `Send` + reducer；5b 删除手写恢复；5c writing 每节产物幂等 | 需要 Checkpointer 兜底；版本 bump 与破坏性改动一起做 | — | 待做（已重定义，见 11.5.4） |
 | **6**（可选） | 按阶段拆子状态 / 分图 | 接完 Checkpointer 后 schema 本就要调整 | 否 | 暂缓 |
 | **7** | 可下载运行轨迹（本地 trace bundle + 一键下载） | 依赖阶段 4 的 state 历史与 LLM 埋点；面向非技术用户的排错入口 | 否 | 暂缓（阶段 5 之后，见 11.6） |
 
-阶段 5 的真实难点（提前记下，见第 11 节）：现在逐篇论文的处理是**节点内的 `asyncio.gather`**，与 `interrupt()` 的语义不兼容，需要在阶段 5 前做一次 spike 决策（子图/Send vs 幂等重跑）。
+2.5 已就"read 怎么拆"拍板：**per-paper `Send` + 全局 `max_concurrency` 限流 + per-paper 磁盘幂等**（A 方案）；B1/B2 作为备选记录在 11.5。阶段 5 **不再做 `interrupt()` 改造**。
 
 ---
 
-## 4. 冻结区（现在不要动）
+## 4. 冻结区（现在不要动；阶段 5 整段删除）
 
-这些代码注定会在阶段 5 被删除或重写，现在花时间整理它们是浪费：
+2.5 已决定去掉暂停点，所以这些代码在阶段 5 不是"重写"，而是**直接删除**：
 
 - `src/graph/checkpoint_halt.py`（整个文件）
-- `src/graph/graph.py` 中的 `_entrypoint` / `_merge_read_checkpoint` / `_papers_from_checkpoint`
-- `State` 中的 `read_resume_checkpoint`、`read_artifact_refs`
+- `src/graph/graph.py` 中的 `_entrypoint` / `_merge_read_checkpoint` / `_papers_from_checkpoint`（删掉后图变成直线，无条件入口）
+- `State` 中的 `read_resume_checkpoint`（阶段 5 删字段）
 - `read_node.py` 中的 halt / resume 分支
 
-**例外（被迫改动）**：阶段 2b 把 `request` 改成 dict 时，`_merge_read_checkpoint` 里构造 `ReviewRequest` 的那三行必须跟着改成构造 dict。**只改类型，不改逻辑**。
+**现在仍不要投入整改**：阶段 3/4 期间它们还在工作，改动只会增加无谓 diff。
+
+**例外（已经发生的被迫改动）**：阶段 2b 把 `request` 改成 dict 时，`_merge_read_checkpoint` 里构造 `ReviewRequest` 的三行已改成构造 dict。只改类型，没改逻辑。
+
+**注意**：`read_artifact_refs` **不在**删除清单里——它是正常产物字段；阶段 3 去掉其中的绝对路径，阶段 5 保留。
 
 ---
 
@@ -187,7 +212,7 @@
 .\.venv\Scripts\python.exe -m unittest discover -s test -v
 ```
 
-**当前基线：54 个用例，`OK (skipped=4)`，约 4~5 秒，默认套件不出网、不依赖本地密钥。**
+**当前基线：59 个用例，`OK (skipped=4)`，约 3~5 秒，默认套件不出网、不依赖本地密钥。**
 
 4 条 skip 是真实模型集成测试，只有显式开启才执行（本地需要可用的 `config/model.json`）：
 
@@ -218,13 +243,13 @@ $env:RUN_LIVE_MODEL_TEST="1"; $env:RUN_MODEL_CONNECTIVITY_TEST="1"
 - 全文下载、Markdown 转换、向量入库没有覆盖（`ENABLE_FULL_TEXT_EMBEDDING=False`）；
 - `compose_reply` 的 Markdown 拼装只被 e2e 间接覆盖。
 
-### 6.2 测试分层（54 条的构成）
+### 6.2 测试分层（59 条的构成）
 
 | 层 | 文件 | 数量 | 依赖 |
 |---|---|---|---|
 | 纯逻辑单测 | `test_extraction_validation`(12)、`test_paper_retrieval_service`(5)、`test_llm_adapters`(4)、`test_settings_router`(4)、`test_search_agent_tool_integration`(3)、`test_session_run_recovery`(4) | 32 | 假对象 / 临时 SQLite，不出网 |
-| 图 e2e | `test_search_graph` | 6 | 假检索服务 + 假 LLM + 临时 SQLite |
-| 字段契约 | `test_state_contract` | 7 | 无 |
+| 图 e2e | `test_search_graph`（6 条管道 + 3 条 2c 验收） | 9 | 假检索服务 + 假 LLM + 临时 SQLite |
+| 字段契约 | `test_state_contract`（7 条契约 + 2 条取消语义） | 9 | 无 |
 | 前后端联调 | `test_front_to_back_gateway` | 5 | TestClient + 假 message handler（不跑真图） |
 | 真实模型集成 | `test_live_model_config`(2)、`test_model_connectivity`(2) | 4 | 真密钥 + 网络，默认 skip |
 
@@ -464,7 +489,7 @@ topic = str(request.get("topic") or "").strip(),
 - 不接 Checkpointer（阶段 4），不装 `langgraph-checkpoint-sqlite`；
 - 不动 `checkpoint_halt.py`、`read_node.py` 的 halt 分支（冻结区）；
 - 不做字段瘦身/去重（`writing_sections` 与 `writing_report["sections"]` 重复、`search_results` 与 `read_results[].paper` 重复）→ 阶段 3；
-- 不碰 `interrupt()` 和逐篇论文的恢复粒度 → 阶段 5；
+- 不碰逐篇论文的恢复粒度 → 阶段 5；`interrupt()` 已决定**不引入**（见 §11.5 决策 3）；
 - **不把 `session_key` / `turn_id` 迁出 state**（它们可序列化、不卡 Checkpointer，属阶段 3 的去重范畴）；
 - 不做 LangSmith 埋点（见第 10 节：阶段 2 只做两件零风险准备）。
 
@@ -498,8 +523,8 @@ topic = str(request.get("topic") or "").strip(),
 | 图结构 | node / edge / 条件边 / `Command(goto)` / 子图 / 递归上限 | 用了前三个 |
 | 状态与持久化 | State schema / channel / reducer / `Overwrite` / checkpointer / `thread_id` / `durability` | 只有 State schema |
 | 运行时注入 | `context_schema` / `Runtime(context, store, stream_writer)` / RetryPolicy / 超时 | 阶段 2 开始用 context |
-| 人机交互 | `interrupt()` / `Command(resume=...)` / 静态断点 | 手写机制，阶段 5 替换 |
-| 并发编排 | `Send` / 子图 / map-reduce | 用 `asyncio.gather` 替代（阶段 5 要重新评估） |
+| 人机交互 | `interrupt()` / `Command(resume=...)` / 静态断点 | 手写机制；2.5 决定不引入 `interrupt()`，阶段 5 直接删除 |
+| 并发编排 | `Send` / 子图 / map-reduce | 用 `asyncio.gather` 替代；2.5 已定阶段 5 改 per-paper `Send` |
 | 流式 | `stream_mode` / `StreamWriter` | 没用（自建 SSE + 事件总线） |
 | 平台层 | Studio / Platform / threads API / assistants | 本地部署用不到 |
 | 生态包 | `create_agent` / `ToolNode` / supervisor / swarm | 没用（自己写 agent） |
@@ -638,52 +663,141 @@ Store 的定位是「Agent 的长期记忆」（namespace + KV + 语义检索）
 
 **触发条件**：出现「跨会话记忆」需求，且需要**按语义检索**（记住用户偏好、已读论文、研究兴趣），而不是按 session_key 查。用户已确认有这个需求但优先级低。
 
-### 11.3 子图 / Send：阶段 5 的决策点
+### 11.3 read 的拆分：2.5 已定 A（per-paper `Send`）
 
-现状问题：阅读节点内用 `asyncio.gather` 并发处理 N 篇论文——并行藏在节点里，LangGraph 只看到「一个节点」：
+现状：阅读节点内用 `asyncio.gather` 并发处理 N 篇论文——并行藏在节点里，LangGraph 只看到"一个节点"，只在整批结束时有一个 checkpoint。
 
-- 只在整批结束时有一个 checkpoint；
-- 中断后节点从头重跑（`_restore_read_results` 只从 state 读，不从磁盘产物读）；
-- `interrupt()` 在 gather 子任务里不可靠。
+**结论：阶段 5 采用 A 方案**——每篇论文一个 `Send` + 全局 `max_concurrency` 限流 + per-paper 磁盘幂等。理由与备选见 §11.5 决策 1。
 
-**结论**：阶段 5 开始前做一次 1~2 天 spike，在「子图/Send 做 per-paper checkpoint」与「保持整节点重跑 + 产物幂等」之间选一个。它会改状态形状，所以必须在阶段 3 定型前决定。
+阶段 5 实施 A 时必须同时处理三件事：
+
+1. **reducer**：多个论文任务并发写 `read_results` / `read_artifact_refs`，用 `Annotated[list, operator.add]`，每个任务只返回自己新增的一条；
+2. **排序**：并发写入顺序不定，最终 `read_results` 要按原始论文排名（`search_results` 的 index 或 `paperId` 映射）重排；
+3. **磁盘幂等**：`_restore_read_results` 要从 `note.json` 恢复，否则 A 的崩溃重做成本会回到"整批重跑"。
 
 ### 11.4 Reducer：与并行分支一起做
 
-现在没用（串行图，一个 key 一个写者）。但已经有两处**手工 reducer**：artifact refs 的 `list(...) + [new]`、`diagnostics` 的读-改-写。一旦引入 Send/并行分支，就必须上 reducer，否则互相覆盖。
+现在没用（串行图，一个 key 一个写者）。但已经有两处**手工 reducer**：artifact refs 的 `list(...) + [new]`、`diagnostics` 的读-改-写。一旦引入 Send/并行分支（阶段 5a），就必须上 reducer，否则互相覆盖。
 
-**结论**：不主动引入；等 Send/并行分支落地时一起设计。这也是 2c「只返回增量」的隐藏前提。
+**结论**：不主动引入；阶段 5a 与 `Send` 一起设计。这也是 2c「只返回增量」的隐藏前提。
 
-### 11.5 阶段 3 前的 DAG / 粒度评审（Gate，只出决策不写代码）
+### 11.5 阶段 2.5 决策记录（✅ 已定稿，2026-11-04）
 
-**为什么必须做**：DAG 的破坏性改动（改节点名、删节点、改边）在「还没有 checkpoint」时几乎免费，一旦有了旧存档就很贵。所以要在阶段 3 定型 state 形状之前，把会改变图结构的问题先定下来。
+**评审目的**：DAG 的破坏性改动（改节点名、删节点、改边）在"还没有 checkpoint"时几乎免费，一旦有旧存档就很贵。所以在阶段 3 定型 state 形状之前，把会改变图结构的问题先定下来。**本阶段不写代码。**
 
-**为什么不能现在做**：2b/2c 正在改数据格式和返回方式，此时再动节点边界会让三个变化叠加，出问题无法归因。**排在 2c 之后、阶段 3 之前，半天到一天。**
+#### 11.5.1 决策总表
 
-**只回答三个问题**：
+| # | 主题 | 决策 |
+|---|---|---|
+| 1 | **read 分发** | **A**：per-paper `Send` + 全局 `max_concurrency` + per-paper 磁盘幂等；B1（并行分批）否决，B2（波次串行）作为备选 |
+| 2 | **writing 分发** | **W1**：保持单节点 + 每节落 `section.json` 做幂等；不拆节点；W2（节级节点）远期；W3（并行写小节）否决 |
+| 3 | **暂停点** | **不要**。资源不可用按普通失败处理，用户修好后重试；**不引入 `interrupt()`** |
+| 4 | **单篇失败** | 记录失败 → 主遍历继续 → **扫尾补跑 1 次** → 仍失败则放弃并记录；**不区分可重试类型**（留扩展点）；**不设总重试预算**（留扩展点）；**0 篇成功才让阶段失败** |
+| 5 | **整阶段失败** | 中止整轮；Checkpointer 停在失败节点前；用户重试时从该节点续跑 |
+| 6 | **用户取消** | 丢弃当前节点结果，**从节点边界重跑**；不做节点内细粒度恢复；成本靠磁盘幂等降低 |
+| 7 | **reducer** | **阶段 5a** 引入（与 read 拆分一起） |
+| 8 | **并发上限** | 保持现有 **3**（`paper_task_concurrency`），做成 `system.yaml` 配置项；现在不调数值 |
+| 9 | **checkpoint 保留** | 方向：只保留未完成的 run；完成的 run 导出轨迹包后删除；阶段 4~6 过渡期用「成功 7 天 / 失败 30 天」 |
 
-1. **粒度**：`read_node` 内部的逐篇并发（`asyncio.gather`）是否拆成子图 / `Send`？`writing` 是否按小节拆？
-   - 现状：一次 run 只有 6 个 checkpoint，而阅读节点可能跑 15 分钟、处理 20 篇；崩溃后整节点重跑。
-   - 备选（更便宜）：不拆节点，但让 `_restore_read_results` 能从磁盘 `note.json` 恢复，做到「节点重跑、每篇幂等」。
-   - 优先级：`read` 高（动态 fan-out + 单篇耗时长）；`writing` 低（串行、节间有依赖，整段重跑可接受）。
-   - 判断依据：崩溃时能接受重跑多少工作。
-2. **暂停点**：`interrupt()` 落在哪？现在的 halt 是「存 checkpoint + 抛异常」，改成 `interrupt()` 后是「挂在节点内 + `Command(resume=...)` 继续」。确认是否需要新增条件边。
-3. **失败语义**：单篇失败 / 整阶段失败 / 用户取消，分别应该重跑什么？要与 checkpoint 粒度对齐，避免「恢复后重复下载」或「恢复了但漏一篇」。
+#### 11.5.2 逐条说明
 
-**产出**：1~2 页决策记录，写回本文档第 11 节；**不改代码**。它的结论直接决定阶段 3 怎么做，以及阶段 5 是否要 bump `GRAPH_VERSION`。
+**1）read 用 A，不用 B2**
 
-**评审前的临时纪律**：阶段 2~4 期间**冻结节点名与 State 字段名**，它们已经是持久化格式的一部分（见第 12 节第 8 条）。
+- A 没有"波次屏障"：一篇慢不会拖住其它任务；
+- 有了 per-paper 磁盘幂等后，A 崩溃重做量 ≈ B2（都只重做未完成的 ≤K 篇）；
+- A 的额外成本只有两个，且都是一次性：reducer + 结果重排。
 
-**推迟拆分不会形成技术债的前提**（两条，缺一不可）：
+B1（分批并行 + 批内 gather）的问题：并发 = 批数 × 批内并发，嵌套超卖；在全局限流下又不比 A 快；成本却叠加。B2（波次串行）的代价是波次屏障空转，只有在"波次 checkpoint 的可见性"特别重要时才值得。
 
-1. 节点名 / state 字段名在上一阶段冻结，破坏性改动只发生在阶段 5 并 bump 版本；
-2. 2.5 评审在阶段 3 之前完成，避免阶段 3 按「read 是一个大列表」定死形状后又要返工。
+**2）writing 用 W1**
 
-**已知约束（拆分 writing 时必须遵守）**：
+- 小节之间有依赖（`previous_sections`、`ref_sections`），并行会破坏章节连贯；
+- 写作质量优先，速度不是目标；
+- W1 不改拓扑，只加"每节产物 + 重跑跳过"，复杂度最低；
+- W2 只在出现"人工暂停/单节重试"的产品需求时才值得做。
 
-- `writing` 目前是**两层结构**：外层 `run_writing` 节点 → 内层单节循环图（`SectionLoopState`）。评审要判断是保持"节点内子图"，还是把小节提升为外层图的节点 / `Send` 分支。
-- 内层循环的进度回调已改用 `ContextVar` 传递（`0ea02cf`），**不在 State 里**。将来把它提升为正式子图时，应把回调迁到子图 context（`runtime.context`），**不要再放回 State**——否则子图 checkpoint 会再次遇到不可序列化函数（见 §9.4 第 4 条）。
-- 这一条不影响阶段 3 的字段形状决策，但会影响阶段 5 的实现方式，评审时一并记录。
+**3）去掉暂停点**
+
+- Checkpointer 本身就能从断点续跑，不需要手写现场；
+- 去掉后可删除 `read_resume_checkpoint`、`checkpoint_halt.py`、`_entrypoint`、`_merge_read_checkpoint`；
+- 代价：UX 从"暂停等待"变成"失败可重试"；
+- `interrupt()` 列入 §14 暂缓事项，触发条件：需要人工暂停/分步确认。
+
+**4）失败处理**
+
+- 主遍历：失败记录 `{paperId, stage, error_kind/status, message, attempts}`，不中断；
+- **扫尾补跑**：主遍历结束后，只对失败集合再跑一次（不是"失败当下立刻重试"）；
+- 放弃：记入 `read_summary.failed_papers`，**不放进 `read_results`**；
+- 底线：成功篇数为 0 → 阶段失败；
+- 不区分可重试类型、不设总预算：见 §11.5.3 扩展点。
+
+**5）整阶段失败**：保持中止，靠 Checkpointer 从失败节点续跑。
+
+**6）取消**：不做节点内细粒度恢复（需要子图或 item 级账本，复杂度高）；节点级重启 + 磁盘幂等已经能覆盖大部分成本。
+
+**7）reducer 放阶段 5a**：现在加会改变所有写入语义（节点只能返回增量），与拆分一起做才对；阶段 5 本来就要 bump `GRAPH_VERSION`，旧 checkpoint 作废，schema 变更成本最低。
+
+**8）并发保持 3**：3 是保守值，对模型/下载都安全；最优值取决于 provider 限流和真实延迟，需要线上数据；现在只做"可配置"，不做"调参"。
+
+**9）checkpoint 保留**：checkpoint 的本职是"恢复"，不是"审计"。未完成的 run 必须留；完成的 run 导出轨迹包后可以删。阶段 7 之前用 7/30 天过渡，避免过早丢掉排查依据。
+
+#### 11.5.3 扩展点（现在不做，留口子，代码里要带注释）
+
+| 扩展点 | 现在 | 触发条件 | 以后怎么加 |
+|---|---|---|---|
+| **可重试分类** | 一律补跑 1 次 | 永久错误的重试浪费明显 | 在 `_should_retry_failure(failure)` 里按 `stage/error_kind/status_code` 判断；失败记录已含这些字段，不改数据结构 |
+| **总重试预算** | 不设 | 大量永久错误 / 补跑耗时不可接受 | 在补跑入口加 `MAX_TOTAL_RETRY` 或 `SKIP_RETRY_AFTER_FAILED` |
+| **`interrupt()` 暂停** | 不做，资源错误按失败 | 需要人工暂停/分步确认 | 用 Checkpointer + `interrupt()` + `Command(resume=...)` |
+| **writing W2（节级节点）** | W1 单节点 | 需要单节重试/节间暂停 | 把小节提升为节点/波次，每节一个 checkpoint |
+| **read B2（波次串行）** | 选 A | 波次 checkpoint 价值 > 屏障损失 | 改成"每波一个节点"的环，批内 gather |
+
+**代码里的注释模板**（实现时照此写，标签用 `TODO(2.5)` 便于全仓检索）：
+
+```python
+def _should_retry_failure(failure: JsonObject) -> bool:
+    """当前策略：所有失败一律补跑一次。
+
+    TODO(2.5): 未来若要区分"永久错误"和"瞬时错误"，在这里判断。
+    - 可重试：timeout / connection / 429 / 5xx / 网络抖动
+    - 不可重试：400/401/403/404/410 / 格式不支持 / 解析失败 / 配置缺失
+    依据：failure 已保存 stage、error_kind、status_code、message，
+          加分类只需改本函数，不需要改数据结构或迁移历史记录。
+    为什么现在不做：分类参数需要真实失败分布；统一补跑 1 次的浪费有界。
+    """
+    return True
+
+# TODO(2.5): 如需总量控制，在这里加 MAX_TOTAL_RETRY / SKIP_RETRY_AFTER_FAILED。
+MAX_RETRY_ATTEMPTS = 1
+```
+
+**其余三个扩展点（`interrupt()`、W2、B2）是计划级备选，不写 TODO 代码**；实现到对应位置时，在函数/图的注释里写明"为什么现在不用、触发条件是什么"，避免以后有人误以为漏做。
+
+#### 11.5.4 对后续阶段的影响
+
+**阶段 3（state 瘦身）新增约束**
+
+- `read_results` 保持**平铺列表**、以 `paperId` 可去重，**不引入按批嵌套结构**；
+- 暂**不加 reducer**（阶段 5a 再加）；
+- artifact refs 去掉绝对路径（原计划不变）。
+
+**阶段 5 重新定义**（本次最大的计划变更）
+
+```
+5a  read 拆 per-paper Send + reducer + 结果排序 + 磁盘幂等接入（bump GRAPH_VERSION）
+5b  删除手写恢复：checkpoint_halt.py、_entrypoint、_merge_read_checkpoint、
+    _papers_from_checkpoint、read_resume_checkpoint 字段
+5c  writing：每节落 section.json，重跑跳过已完成节（W1）
+（原计划的 interrupt() 重写 —— 取消，改为 §14 暂缓项）
+```
+
+**版本边界**：阶段 5a 是破坏性变更（图拓扑 + reducer + 字段删除），必须 bump `GRAPH_VERSION`、换 `thread_id`，让旧 checkpoint 显式作废。阶段 3/4 期间节点名与 State 字段名冻结。
+
+#### 11.5.5 2.5 明确不做
+
+- 不改任何代码；
+- 不拆图、不加 `Send`、不加 reducer、不引入 `interrupt()`；
+- 不调并发数值；
+- 不实现轨迹包（阶段 7）。
 
 ### 11.6 可下载运行轨迹（面向用户的排错包，阶段 7，暂缓）
 
@@ -744,6 +858,50 @@ data/sessions/<key>/traces/<turn_id>/
 
 **触发条件**：阶段 4 完成（有 state 历史）+ LLM 埋点完成（见 §10）。在此之前不写导出代码、不引入采样。
 
+### 11.7 部署与基础设施（2026-11-04 讨论结论）
+
+**目标**：最终部署到公网服务器、多用户使用。但**不是现在**；当前仍是"单进程 + SQLite + 本地磁盘"。
+
+**开源 vs 线上：单仓 + 配置，不分叉**
+
+- 同一份代码，用配置/开关控制运行形态（`auth_required`、多用户模式）；
+- 认证/鉴权在 API 层，数据隔离在仓储层（`user_id` 已在 `session` 表），**图与 State 不出现用户概念**；
+- 多租户代码本身可以开源；闭源与否是商业选择，不是技术必然；
+- 唯一要提前定的是阶段 4 的 `thread_id` 是否带用户命名空间（`user_id:session_key:turn_id`）；
+- **禁止 fork 两份代码**（长期维护灾难）；open-core 是以后的事。
+
+**基础设施路线（按触发条件，不是按时间）**
+
+| 阶段 | 形态 | 触发条件 |
+|---|---|---|
+| 现在 | 单进程 + SQLite + 本地磁盘 | — |
+| 第一次上线 | 单台 VM + **Docker** + Caddy/Nginx + SQLite + 本地磁盘 | 要给外部用户用 |
+| 规模上来 | + **PostgreSQL** + 对象存储 + 独立 worker | 多用户并发 / 多实例（详见 §11.1） |
+| 再往上 | + **Redis**（broker/锁/缓存） | 多实例、独立 worker |
+| 更大 | + **K8s** | 多副本编排、弹性伸缩 |
+| 不需要 | **Kafka** | 量级差 4~5 个数量级；事件是"存储 + 查询"，不是流处理 |
+
+**SSE vs WebSocket：保留 SSE**
+
+- 需求是服务端 → 客户端单向推进度，命令走 REST；SSE 更简单，`EventSource` 自动重连，反代/CDN 友好；
+- WebSocket 只在需要双向/二进制/高频双向消息时才值得；
+- **上线前要补两个洞**（见 §12 第 11 条）：真实心跳（`asyncio.wait_for` + `: ping` 注释帧）、按 `Last-Event-ID` 回放；
+- 多实例时给 SSE 加 Redis pub/sub 或粘性路由，但**不换协议**。
+
+**存储量级（实测估算，用于 retention 决策）**
+
+- 单轮小 run（3 篇）：81 事件 / 约 143KB；11 个产物 / 约 42KB；最终 state 约 43KB；
+- 6 个 checkpoint 约 0.25MB；
+- 真实 run（20 篇）估 2~4MB/轮；checkpoint 存的是**全量 channel 值**，节点返回增量不减小快照。
+
+**现在要做的准备（零代码或极小）**
+
+1. 守住三个边界：`SessionRunService`（run 生命周期）、`SessionRunBroker`（事件分发）、`SessionRepository`（数据访问）；
+2. artifact refs 去绝对路径（阶段 3 任务 3.2）；
+3. 配置外置（host/port/数据目录/密钥），不要写死；
+4. 并发上限做成配置（阶段 5 前）；
+5. 不要为 K8s 提前设计；不要引入 Redis/Kafka。
+
 ---
 
 ## 12. 已知问题 / 待决策
@@ -753,10 +911,14 @@ data/sessions/<key>/traces/<turn_id>/
 3. **上游 `origin/dev` 与 `main` 分叉**，不要混用，见第 2 节。
 4. **`thread_id` 粒度待定**（阶段 4 前必须定）：建议 `session_key:turn_id`。
 5. **`durability` 待定**（阶段 4）：默认 `async` 可能丢最后一个 checkpoint，要"崩溃后续跑"应设 `sync`。
-6. **checkpoint retention 策略待定**（阶段 4）：不清理会随「节点数 × run 数」线性增长。
+6. **checkpoint retention**（阶段 4/7）：方向是只保留未完成的 run、完成的 run 导出轨迹包后删除；阶段 4~6 过渡期用成功 7 天 / 失败 30 天。
 7. **SSE 澄清**：实时推送只有 SSE 一条（`sessions.py:103-121` + 前端 `EventSource`），没有 WebSocket；`POST /messages` 是遗留同步入口，只有 `test/frontend_api_client.py` 在用。
 8. **节点名与 State 字段名是持久化契约**（阶段 4 之后生效）：checkpoint 的待办/版本记录按节点名索引，改类名/删节点会让旧存档失效或静默跳步。阶段 2~4 冻结这两类名字；破坏性改动放在阶段 5，并 bump `GRAPH_VERSION`、换 `thread_id`，让旧存档显式作废而不是误用。
 9. **恢复前必须校验图版本**（阶段 4）：版本不匹配时拒绝续跑并提示用户重跑，不能静默恢复。
+10. **暂停点已取消**（2.5）：`read_resume_checkpoint` + `checkpoint_halt` 在阶段 5 删除；资源不可用按"失败 + 重试"处理（见 §11.5 决策 3）。
+11. **SSE 上线前要补两个洞**：`sessions.py` 的注释声称"定期发送心跳"，但生成器没有实现；`encode_sse` 会输出 `id:`，但服务端没有按 `Last-Event-ID` 回放。公网部署前补：20~30s 的 `: ping` 注释帧 + 断线补发（按 `seq_no`）。
+12. **失败补跑的两个扩展点**（2.5）：可重试分类、总重试预算，现在都未实现，触发条件与注释模板见 §11.5.3。
+13. **`read_results[].paper` 与 `search_results` 的重复**：阶段 3 暂不处理（消费方 8+ 处：`analyse_node.py:243/275`、`writing_node.py:527/538/550/579`、`writingAgent.py:533/805/826/898`、`read_node.py:551/683`），留到阶段 5 重写 read 时统一。阶段 3 只做 `writing_sections` 去重 + artifact 路径。
 
 ---
 
@@ -772,24 +934,163 @@ data/sessions/<key>/traces/<turn_id>/
 
 ---
 
-## 14. 下次会话从这里开始
+## 14. 已讨论但暂缓 / 明确不做（新会话不要重复讨论）
 
-**下一步是 2.5 DAG / 粒度评审（Gate，不写代码）**——阶段 2 已全部完成。按顺序做，每步跑一次全量测试
-（`.\.venv\Scripts\python.exe -m unittest discover -s test`），判断标准是
-**`OK (skipped=4)`，失败集合为空**。
+下面这些都在 2026-10-30 ~ 11-04 的讨论中有了结论。**没有触发条件就不做**，不要因为"看起来更完整"而提前引入。
 
-1. ✅ 取消测试（`7fdf201`）
-2. ✅ **2a**：context 加 `session_repo`；State 删 8 个字段；节点签名 `(state, runtime)`（必填）；包装器转发 runtime；测试改 mock 注入；删 `reply_node` 的透传（`590d953`）
-3. ✅ run 级 config metadata（`c1803c1`）
-4. ✅ **2b**：`request` / `search_results` 转 dict；清理 4 处 `getattr`；`_papers_from_checkpoint` 删除；`GraphRunResult.papers` 改类型（`3431165`）。
-   - 遗留观察：`search_results[0]` 的 dict 化已由测试守护；内部 `PaperDocument` 仍保留，按计划留到阶段 5 重写 `read_node` 时成片统一（见 §9.4）。
-5. ✅ **2c**：6 个节点最小增量返回；`_entrypoint` 真值判断；read 写 `read_resume_checkpoint={}`；补 3 条验收测试（字段完整性 / `json.dumps` / 失败后恢复）（`0ea02cf`）。
-   - **顺带修掉一个真实阻断点**：`WritingAgent` 把 `progress_callback` 函数放进内层小节循环的 State，接 saver 后会抛 `Type is not msgpack serializable: function`；已改为 `ContextVar` 传递。
-6. **2.5 DAG / 粒度评审（Gate，不写代码）**：阶段 3 开工前必须完成，回答「read / writing 是否拆子图」「暂停点在哪」「失败语义」三个问题，结论写回第 11.5 节。**没做这个评审，不要开始阶段 3。**（当前唯一待办）
-7. **3**：state 瘦身（去重 + artifact 去绝对路径）。
-8. **4**：接 SQLite Checkpointer（工厂 / `thread_id` / `durability` / retention / 版本校验）；顺手把 `thread_id`、`checkpoint_id` 加进事件（为阶段 7 铺路）。
-9. **5**：按 2.5 结论处理 read / writing 的粒度，用 `interrupt()` 重写暂停恢复，bump `GRAPH_VERSION`。
-10. **7**：可下载运行轨迹（见 11.6），前置是阶段 4 + LLM 埋点；不采样、不做展示 UI。
-11. **收尾**：更新本文档（阶段打勾、记录实际 diff 与遗留问题）。
+| 事项 | 结论 | 触发条件 | 详见 |
+|---|---|---|---|
+| **Store（跨会话记忆）** | 暂缓 | 需要按语义检索用户偏好/已读论文 | §11.2 |
+| **MCP** | 暂缓 | 要接外部工具生态（Zotero/Notion/文件），或让本项目被 Claude/Cursor 调用 | §9 / 本条下方 |
+| **A2A** | 暂缓 | 产品变成"可被其他 Agent 调用的服务" | 本条下方 |
+| **RSI（递归自我改进）** | 不做 | 有明确自改进目标 + 评测体系 + 沙箱 | 本条下方 |
+| **Redis** | 暂缓 | 多实例 / 独立 worker / 分布式锁 | §11.7 |
+| **K8s** | 暂缓 | 多副本编排、弹性伸缩 | §11.7 |
+| **Kafka** | **不做**（量级差 4~5 个数量级） | 百万级事件/秒、多消费者回放 | §11.7 |
+| **用户主动暂停 / 写作前确认** | 暂缓（即 `interrupt()`） | 出现人工暂停/分步确认的产品需求 | §11.5 决策 3 |
+| **writing W2（节级节点）** | 暂缓 | 需要单节重试/节间暂停 | §11.5 决策 2 |
+| **read B2（波次串行）** | 备选 | 波次 checkpoint 价值 > 屏障损失 | §11.5 决策 1 |
+| **可重试分类 / 总重试预算** | 暂缓 | 永久错误的重试浪费明显 / 补跑耗时不可接受 | §11.5.3 |
+| **内部 `PaperDocument` 全量 dict 化** | 阶段 5 统一 | 重写 read 时 | §9.4 |
+| **SSE → WebSocket** | **不换**，保留 SSE | 需要双向/二进制/高频双向消息 | §11.7 |
+| **开源版 vs 线上版分叉** | **不分叉**，单仓 + 配置 | 真要 open-core 时再拆包 | §11.7 |
+| **Postgres** | 暂缓 | 多用户并发 / 多实例 | §11.1 |
+| **轨迹展示 UI / 采样** | 不做 | 有真实排错需求且数据已齐 | §11.6 |
 
-**不要在本轮做**：接 Checkpointer、装 sqlite/postgres saver、字段瘦身、`interrupt()`、LangSmith 埋点、轨迹导出、任何 Postgres 相关代码。
+**MCP / A2A / RSI 的一句话结论**：协议只在"有边界"时才值钱。当前工具是进程内函数、Agent 是同一张图的角色，没有 MCP/A2A 的边界；RSI 是研究方向，不是基础设施。现有接缝（`ToolRegistry`/`ToolSpec`、`AgentSpec`）保持声明式，将来加适配层是增量而非重写。
+
+**开源 vs 线上的一句话结论**：代码同源、部署不同配；认证/权限属于 API 层，仓储负责按 `user_id` 隔离，图与 State 不出现用户概念。唯一要提前定的是阶段 4 的 `thread_id` 是否带用户命名空间。
+
+**基础设施的一句话结论**：现在需要的是 **Docker + PostgreSQL（多用户时）**；Redis 等多实例，K8s 等多副本，Kafka 不用。当前基础设施是"单进程 + SQLite + 本地磁盘"，其余都是候选组件。
+
+---
+
+## 15. 新会话从这里开始（阶段 3）
+
+### 15.0 三分钟上手
+
+```powershell
+# 1) 确认状态
+git log --oneline -3          # 应为 7788c44 或之后
+git status --short            # 若只显示 REFACTOR_PLAN.md，属正常（本次交接更新）
+
+# 2) 跑全量测试（唯一验收命令）
+.\.venv\Scripts\python.exe -m unittest discover -s test
+# 期望：Ran 59 tests ... OK (skipped=4)
+```
+
+读文档顺序：本节 → §11.5（2.5 决策）→ §9（概念）→ 需要时再看 §5~§8。
+
+### 15.1 阶段 3 目标与边界
+
+**目标**：让 State 更小、更可移植——去掉重复数据和绝对路径；**不改图拓扑、不加 reducer、不改节点返回形状**。
+
+**为什么现在做**：阶段 4 的 Checkpointer 会把 State 原样存进 SQLite；绝对路径会让快照无法跨机器/跨存储迁移，重复数据会放大快照体积。
+
+**完成标准**：
+
+- 59 条测试仍绿（新增测试后总数增加）；
+- `json.dumps(final_state)` 成功；
+- 最终 State 里**没有** `writing_sections`；
+- 最终 State 的 artifact refs 里**没有绝对路径**（无盘符、无以 `/` 开头的路径）；
+- 产物下载、写作读取等消费方行为不变。
+
+### 15.2 任务 3.1：删除 `writing_sections`（低风险，先做）
+
+**依据**：`writing_report["sections"]` 已经是权威正文（引用已替换成编号），`writing_sections` 只是它的副本。
+
+**消费方清单**（行号可能漂移，以函数名为准）：
+
+| 位置 | 用途 | 改法 |
+|---|---|---|
+| `writing_node.py` 返回值（约 252-263） | 写入 `writing_sections` | 删除该键 |
+| `reply_node.py:32` | 读取 `writing_sections` | 改成从 `writing_report.get("sections")` 取 |
+| `reply_node.py:49` | 传给 `_build_final_markdown` | 去掉该参数 |
+| `reply_node.py:81` | 统计小节数 | 用 `len(report sections)` |
+| `reply_node.py:119` | 事件 payload | 用同一份 sections |
+| `reply_node.py:159-162` | `_build_final_markdown` 的 fallback | 只从 report 取 |
+| `graph.py` 初始状态（约 265） | `writing_sections=[]` | 删除 |
+| `state_models.py:36` | 字段声明 | 删除 |
+| `test/test_search_graph.py:200` | 核心字段断言 | 移除该键，断言 `writing_report` 里 sections 非空 |
+
+**前置检查**：确认 `_build_writing_report` 在所有路径都会写 `sections`（包括无 LLM 的 fallback）。若存在"只有 `writing_sections` 有内容"的路径，先把 `sections` 补齐再删字段。
+
+### 15.3 任务 3.2：artifact refs 去绝对路径（中风险，第二步）
+
+**问题**：State 里的 `*_artifact_refs` 每项都含 `"path": str(record["path"])`（绝对路径）。构造点：
+
+- `repositories/node_persistence/search_persistence.py:188`
+- `repositories/node_persistence/read_persistence.py:101`
+- `graph/analyse_node.py:482`
+- `graph/writing_outline_node.py:285`
+- `graph/writing_node.py:873`
+- `graph/reply_node.py:234`
+- （`search_persistence.py:35` 还有一处 `"path": self.path`，确认是否进入 State）
+
+**关键消费方**：
+
+- `graph/writing_node.py:293`：遍历 `session.artifacts`，用 `artifact["path"]` 读 `paper_read_note` 文件；
+- `repositories/sessions/sqlite.py:681`：把 `path` 解析成真实文件；
+- 下载接口/前端：确认是按 `artifact_id` 还是 `path` 取文件。
+
+**做法**：
+
+1. 在 State 面向的边界统一一个 helper（例如 `to_artifact_ref(record)`），输出只含 `artifact_id / artifact_type / name / size / created_at / metadata`；
+2. 持久化 dataclass（`SearchArtifactRef`、`ReadPersistenceResult`）可以保留 `path` 供内部使用，但**转成 State/事件时不得输出**；
+3. 需要真实文件的地方改用 `repo.get_artifact_path(artifact_id)`（若仓储没有，抽一个公共解析方法，复用 `sqlite.py:681` 的逻辑）；
+4. 数据库内部仍存 `path`，不改表结构。
+
+**验收**：
+
+- 新增测试：`json.dumps(final_state)` 后用正则断言不出现 `[A-Za-z]:\\` 或 `"path"` 字段；
+- 下载/写作读取的现有测试仍绿；
+- 如果前端依赖 `artifact.path`，先改前端改用 `artifact_id`（搜索 `front/src` 的 `path`）。
+
+### 15.4 任务 3.3：`read_results[].paper` 与 `search_results` 的重复（**本阶段不做**）
+
+消费方 8+ 处，去掉会牵连 analyse/writing/read 恢复。留到阶段 5 重写 read 时统一。**阶段 3 只记录，不动。**
+
+### 15.5 测试与验收清单
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s test
+```
+
+- 全绿（`OK (skipped=4)`，总数 ≥59）；
+- `test_final_state_is_json_serializable` 仍通过；
+- 新增：无 `writing_sections` 断言、无绝对路径断言；
+- 手工冒烟（可选）：跑一次 `run_graph`，确认 reply 的最终 markdown 与事件 payload 正常。
+
+### 15.6 风险与停手条件
+
+- 发现前端依赖 `artifact.path` 或 `writing_sections`：先改消费方，再删字段；
+- 发现某条路径 `writing_report.sections` 为空：先补数据，再删；
+- **任何需要改图拓扑/加 reducer 的冲动**：停手，写回本文档，留到阶段 5。
+
+### 15.7 提交规范
+
+- 每个任务一个提交，提交信息用 `refactor(state): ...`；
+- 每步提交前跑全量测试；
+- 阶段完成后更新本文档：状态表、路线图打勾、本节改为"已完成记录"，并写实际 diff 与遗留问题；
+- **不要推 `origin/dev`**（见 §2）。
+
+### 15.8 之后三个阶段（摘要）
+
+**阶段 4（Checkpointer）**：`langgraph-checkpoint-sqlite` + 工厂（按配置切换 InMemory/SQLite）+ `thread_id = session_key:turn_id`（是否带 `user_id` 命名空间在此决定）+ `durability=sync`（可续跑优先）+ `GRAPH_VERSION` 校验 + retention；事件里加 `thread_id`/`checkpoint_id`；测试覆盖"崩溃续跑"和"版本不匹配拒绝恢复"。
+
+**阶段 5（重定义）**：
+
+```
+5a  read 拆 per-paper Send + reducer + 结果排序 + 磁盘幂等（bump GRAPH_VERSION）
+5b  删除手写恢复：checkpoint_halt.py、_entrypoint、_merge_read_checkpoint、
+    _papers_from_checkpoint、read_resume_checkpoint 字段
+5c  writing：每节落 section.json，重跑跳过已完成节（W1）
+```
+
+阶段 5 前先补 **per-paper 磁盘幂等**：`_restore_read_results` 从 `note.json` 恢复、原子写、`note_version` 字段。它是 A 方案成立的前提。
+
+**阶段 7（轨迹包）**：见 §11.6；前置是阶段 4 + LLM 埋点；不做采样、不做展示 UI。上线前另补 SSE 心跳 + `Last-Event-ID` 回放（§12 第 11 条）。
+
+### 15.9 不要在本轮做
+
+接 Checkpointer、装 sqlite/postgres saver、拆图/`Send`、reducer、`interrupt()`、LangSmith 埋点、轨迹导出、Postgres/Redis/K8s/Kafka、MCP/A2A/RSI、`read_results[].paper` 去重。
